@@ -202,7 +202,11 @@ func setDefaults(conf *Config, bus awlevent.Bus) {
 	}
 
 	if conf.DNS.ListenAddress == "" {
-		conf.DNS.ListenAddress = awldns.DefaultDNSAddress
+		if runtime.GOOS == "android" {
+			conf.DNS.ListenAddress = awldns.DefaultNon53DNSAddress
+		} else {
+			conf.DNS.ListenAddress = awldns.DefaultDNSAddress
+		}
 	}
 	if conf.DNS.UpstreamDNSAddress == "" {
 		conf.DNS.UpstreamDNSAddress = awldns.DefaultUpstreamDNSAddress

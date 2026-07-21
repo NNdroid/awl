@@ -144,7 +144,7 @@ func (data *Packet) RecalculateChecksum() {
 		return
 	}
 	copy(data.Packet[ipv4offsetChecksum:], []byte{0, 0})
-	ipChecksum := checksumIPv4Header(data.Packet[:ipHeaderLen])
+	ipChecksum := ChecksumIPv4Header(data.Packet[:ipHeaderLen])
 	binary.BigEndian.PutUint16(data.Packet[ipv4offsetChecksum:], ipChecksum)
 
 	switch protocol := data.Packet[9]; protocol {
@@ -216,7 +216,7 @@ func (data *Packet) setAddrs() {
 	}
 }
 
-func checksumIPv4Header(buf []byte) uint16 {
+func ChecksumIPv4Header(buf []byte) uint16 {
 	var v uint32
 	for i := 0; i < len(buf)-1; i += 2 {
 		v += uint32(binary.BigEndian.Uint16(buf[i:]))

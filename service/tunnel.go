@@ -14,6 +14,9 @@ import (
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 
+	"encoding/binary"
+
+	"github.com/anywherelan/awl/awldns"
 	"github.com/anywherelan/awl/awlevent"
 	"github.com/anywherelan/awl/config"
 	"github.com/anywherelan/awl/metrics"
@@ -268,6 +271,19 @@ func (t *Tunnel) HandleReadPackets(packets []*vpn.Packet) {
 	for i, packet := range packets {
 		if packet == nil {
 			continue
+		}
+
+		// Intercept Magic DNS queries
+		if !packet.IsIPv6 && packet.IPProtocol == vpn.IPProtocolUDP && packet.Dst.Equal(MagicDNSIP) {
+			ipHeaderLen := int((packet.Packet[0] & 0x0F) * 4)
+			if len(packet.Packet) >= ipHeaderLen+8 {
+				dstPort := binary.BigEndian.Uint16(packet.Packet[ipHeaderLen+2 : ipHeaderLen+4])
+				if dstPort == 53 {
+					t.handleMagicDNSForward(packet)
+					packets[i] = nil
+					continue
+				}
+			}
 		}
 
 		// P2P broadcast/unicast lookup
@@ -791,6 +807,94 @@ func (t *Tunnel) writeInboundBatch(packets []*vpn.Packet, bufs [][]byte, senderI
 // isNonRoutableIP returns true for IPs that should not be forwarded through the gateway.
 func isNonRoutableIP(ip net.IP) bool {
 	return ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast()
+}
+
+// MagicDNSIP is a dummy IP used on Android to force DNS queries into the TUN interface.
+// When the tunnel reads a UDP packet destined to MagicDNSIP:53, it intercepts it
+// and proxies the query to the local awldns UDP server.
+var MagicDNSIP = net.ParseIP(awldns.MagicDNSIP).To4()
+
+func (t *Tunnel) handleMagicDNSForward(packet *vpn.Packet) {
+	// Extract the original DNS query payload
+	ipHeaderLen := int((packet.Packet[0] & 0x0F) * 4)
+	udpHeaderOffset := ipHeaderLen
+	if len(packet.Packet) <= udpHeaderOffset+8 {
+		t.device.PutTempPacket(packet)
+		return
+	}
+	originalSrcIP := make(net.IP, len(packet.Src))
+	copy(originalSrcIP, packet.Src)
+	originalSrcPort := binary.BigEndian.Uint16(packet.Packet[udpHeaderOffset : udpHeaderOffset+2])
+	payload := packet.Packet[udpHeaderOffset+8:]
+
+	dnsPayload := make([]byte, len(payload))
+	copy(dnsPayload, payload)
+	t.device.PutTempPacket(packet)
+
+	dnsAddr := t.conf.DNS.ListenAddress
+
+	go func() {
+		conn, err := net.Dial("udp", dnsAddr)
+		if err != nil {
+			t.logger.Warnf("failed to dial local dns %s: %v", dnsAddr, err)
+			return
+		}
+		defer conn.Close()
+
+		_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+		_, err = conn.Write(dnsPayload)
+		if err != nil {
+			return
+		}
+
+		respBuf := make([]byte, 1500)
+		n, err := conn.Read(respBuf)
+		if err != nil || n == 0 {
+			return
+		}
+		respPayload := respBuf[:n]
+
+		// Craft the return IPv4 UDP packet
+		respPacket := t.device.GetTempPacket()
+		totalLen := 20 + 8 + len(respPayload)
+		if totalLen > len(respPacket.Buffer)-vpn.TunPacketOffset {
+			t.device.PutTempPacket(respPacket)
+			return
+		}
+
+		buf := respPacket.Buffer[vpn.TunPacketOffset : vpn.TunPacketOffset+totalLen]
+		respPacket.Packet = buf
+		respPacket.IsIPv6 = false
+
+		// IPv4 Header (20 bytes)
+		buf[0] = 0x45 // Version 4, IHL 5
+		buf[1] = 0x00 // TOS
+		binary.BigEndian.PutUint16(buf[2:4], uint16(totalLen))
+		binary.BigEndian.PutUint16(buf[4:6], 0) // ID
+		binary.BigEndian.PutUint16(buf[6:8], 0) // Flags/Frag
+		buf[8] = 64                             // TTL
+		buf[9] = vpn.IPProtocolUDP
+		binary.BigEndian.PutUint16(buf[10:12], 0) // Checksum (computed later)
+		copy(buf[12:16], MagicDNSIP)
+		copy(buf[16:20], originalSrcIP.To4())
+
+		// Calculate IP Checksum
+		ipChecksum := vpn.ChecksumIPv4Header(buf[:20])
+		binary.BigEndian.PutUint16(buf[10:12], ipChecksum)
+
+		// UDP Header (8 bytes)
+		binary.BigEndian.PutUint16(buf[20:22], 53)
+		binary.BigEndian.PutUint16(buf[22:24], originalSrcPort)
+		binary.BigEndian.PutUint16(buf[24:26], uint16(8+len(respPayload)))
+		binary.BigEndian.PutUint16(buf[26:28], 0) // Optional for IPv4 UDP
+
+		// Payload
+		copy(buf[28:], respPayload)
+
+		// Write back to TUN
+		_ = t.device.WriteBufs([][]byte{respPacket.Buf()})
+		t.device.PutTempPacket(respPacket)
+	}()
 }
 
 func readBatchFromChan(ch chan *vpn.Packet, buf []*vpn.Packet, offset int) []*vpn.Packet {

@@ -20,6 +20,7 @@ const (
 	maxContentSize = InterfaceMTU + 100
 	// internal tun header. see offset in tun_darwin (4) and tun_linux (virtioNetHdrLen, currently 10)
 	tunPacketOffset = 14
+	TunPacketOffset = tunPacketOffset
 	// MaxPacketBodySize is the largest tunnel packet body (an IP packet, without
 	// the internal TUN header offset) that Packet.Buffer can hold. Peers must not
 	// send larger frames: protocol.ReadPacketHeader rejects oversized ones up front and

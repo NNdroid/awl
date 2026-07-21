@@ -22,8 +22,10 @@ const (
 const (
 	LocalDomain               = "awl"
 	DefaultDNSAddress         = "127.0.0.66:53"
+	DefaultNon53DNSAddress    = "127.0.0.66:35353"
 	DefaultDNSPort            = "53"
 	DefaultUpstreamDNSAddress = "1.1.1.1:53"
+	MagicDNSIP                = "100.100.100.66"
 )
 
 type Resolver struct {
