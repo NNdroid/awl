@@ -536,7 +536,7 @@ func (t *testTun) Close() error {
 	return nil
 }
 
-var testPortCounter int32 = 40000
+var testPortCounter int32 = 20000
 
 func pickFreeAddr(t testing.TB) string {
 	port := atomic.AddInt32(&testPortCounter, 1)

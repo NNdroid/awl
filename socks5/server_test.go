@@ -117,7 +117,7 @@ func TestProxyWithAuthRejection(t *testing.T) {
 	}
 }
 
-var testPortCounter int32 = 50000
+var testPortCounter int32 = 25000
 
 func pickFreeAddr(t testing.TB) string {
 	port := atomic.AddInt32(&testPortCounter, 1)
