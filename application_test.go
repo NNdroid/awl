@@ -842,15 +842,18 @@ func testSOCKS5Proxy(ts *TestSuite, proxyAddr string, expectSocksErr string) {
 func testSOCKS5ProxyWithAuth(ts *TestSuite, proxyAddr string, auth *proxy.Auth, iterations int, expectSocksErr string) {
 	// setup mock server
 	expectedBody := strings.Repeat("test text", 10_000)
-	addr := pickFreeAddr(ts.t)
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	ts.NoError(err)
+	addr := l.Addr().String()
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/test", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = fmt.Fprint(w, expectedBody)
 	})
 	//nolint
-	httpServer := &http.Server{Addr: addr, Handler: mux}
+	httpServer := &http.Server{Handler: mux}
 	go func() {
-		_ = httpServer.ListenAndServe()
+		_ = httpServer.Serve(l)
 	}()
 	defer func() {
 		httpServer.Shutdown(context.Background())

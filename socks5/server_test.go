@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -116,32 +117,36 @@ func TestProxyWithAuthRejection(t *testing.T) {
 	}
 }
 
-func pickFreeAddr(t testing.TB) string {
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer l.Close()
+var testPortCounter int32 = 50000
 
-	return l.Addr().String()
+func pickFreeAddr(t testing.TB) string {
+	port := atomic.AddInt32(&testPortCounter, 1)
+	if port < testPortCounter {
+		t.Fatalf("port counter overflow: %d", port)
+	}
+	return fmt.Sprintf("127.0.0.1:%d", port)
 }
 
 // startUpstreamServer starts an HTTP server that responds with "test text" on /test.
 func startUpstreamServer(t testing.TB) string {
-	addr := pickFreeAddr(t)
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/test", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = fmt.Fprintf(w, "test text")
 	})
 	//nolint
-	httpServer := &http.Server{Addr: addr, Handler: mux}
+	httpServer := &http.Server{Handler: mux}
 	go func() {
-		_ = httpServer.ListenAndServe()
+		_ = httpServer.Serve(l)
 	}()
 	t.Cleanup(func() {
 		httpServer.Shutdown(context.Background())
 	})
-	return addr
+	return l.Addr().String()
 }
 
 // newSOCKS5HttpClient creates an HTTP client that routes through a SOCKS5 proxy.
