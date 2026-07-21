@@ -49,8 +49,9 @@ import (
 )
 
 const (
-	testTunIf     = "awl0"
-	testAwlSubnet = "10.66.0.0/16"
+	testTunIf      = "awl0"
+	testAwlSubnet  = "10.66.0.0/16"
+	testAwlSubnet6 = "fd00:66::/48"
 	ipForwardPath = "/proc/sys/net/ipv4/ip_forward"
 )
 
@@ -65,7 +66,7 @@ func TestGatewayHostNetNATLifecycle(t *testing.T) {
 	before := snapshotNet(t)
 
 	mgr := NewManager()
-	require.NoError(t, mgr.EnableServerNAT(testAwlSubnet, testTunIf))
+	require.NoError(t, mgr.EnableServerNAT(testAwlSubnet, testAwlSubnet6, testTunIf))
 	require.True(t, mgr.ServerNATActive())
 
 	assertNATApplied(t)
@@ -97,13 +98,13 @@ func TestGatewayHostNetNATIdempotentResetup(t *testing.T) {
 	before := snapshotNet(t)
 
 	mgr1 := NewManager()
-	require.NoError(t, mgr1.EnableServerNAT(testAwlSubnet, testTunIf))
+	require.NoError(t, mgr1.EnableServerNAT(testAwlSubnet, testAwlSubnet6, testTunIf))
 	applied1 := snapshotNet(t)
 
 	// Second manager over the live state of the first — simulates a leftover
 	// from a process that was killed before teardown ran.
 	mgr2 := NewManager()
-	require.NoError(t, mgr2.EnableServerNAT(testAwlSubnet, testTunIf),
+	require.NoError(t, mgr2.EnableServerNAT(testAwlSubnet, testAwlSubnet6, testTunIf),
 		"re-setup over leftover state must succeed (cleanupStaleNAT)")
 	applied2 := snapshotNet(t)
 
@@ -126,7 +127,7 @@ func TestGatewayHostNetNATPreservesExistingIPForward(t *testing.T) {
 	}
 
 	mgr := NewManager()
-	require.NoError(t, mgr.EnableServerNAT(testAwlSubnet, testTunIf))
+	require.NoError(t, mgr.EnableServerNAT(testAwlSubnet, testAwlSubnet6, testTunIf))
 	require.Equal(t, "1", readForward(t))
 
 	require.NoError(t, mgr.DisableServerNAT())

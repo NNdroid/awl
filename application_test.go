@@ -794,7 +794,6 @@ func TestUpdatePeerSettingsIPAddr(t *testing.T) {
 		})
 		ts.NoError(err)
 	})
-
 }
 
 func TestDisableVPNInterface(t *testing.T) {

@@ -279,14 +279,7 @@ func (t *Tunnel) HandleReadPackets(packets []*vpn.Packet) {
 			// from the internet via NAT, not our own p2p initiative to the
 			// same peer). Subnet check is local to this side — no cross-side
 			// dependency on the client's awl subnet.
-			var srcFromInternet bool
-			if packet.IsIPv6 {
-				if t.awlSubnet6 != nil {
-					srcFromInternet = !t.awlSubnet6.Contains(packet.Src)
-				}
-			} else {
-				srcFromInternet = !t.awlSubnet.Contains(packet.Src)
-			}
+			srcFromInternet := !t.isAWLSubnet(packet.Src, packet.IsIPv6)
 
 			if vpnPeer.weAllowUsingAsExitNode.Load() && t.vpnGatewayServerEnabled && srcFromInternet {
 				packet.GatewayDir = vpn.GatewayDirReturn
@@ -319,14 +312,7 @@ func (t *Tunnel) HandleReadPackets(packets []*vpn.Packet) {
 
 		// VPN gateway client mode: forward non-local packets to the gateway peer.
 		if t.vpnGatewayClientEnabled && t.vpnGatewayPeer != nil {
-			var isAWLSubnet bool
-			if packet.IsIPv6 {
-				if t.awlSubnet6 != nil {
-					isAWLSubnet = t.awlSubnet6.Contains(packet.Dst)
-				}
-			} else {
-				isAWLSubnet = t.awlSubnet.Contains(packet.Dst)
-			}
+			isAWLSubnet := t.isAWLSubnet(packet.Dst, packet.IsIPv6)
 
 			if isNonRoutableIP(packet.Dst) || isAWLSubnet {
 				continue
@@ -360,6 +346,16 @@ func (t *Tunnel) makeTunnelStream(ctx context.Context, peerID peer.ID) (network.
 	}
 
 	return stream, nil
+}
+
+func (t *Tunnel) isAWLSubnet(ip net.IP, isIPv6 bool) bool {
+	if isIPv6 {
+		if t.awlSubnet6 != nil {
+			return t.awlSubnet6.Contains(ip)
+		}
+		return false
+	}
+	return t.awlSubnet.Contains(ip)
 }
 
 type VpnPeer struct {
