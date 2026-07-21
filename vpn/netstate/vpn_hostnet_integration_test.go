@@ -52,7 +52,7 @@ const (
 	testTunIf      = "awl0"
 	testAwlSubnet  = "10.66.0.0/16"
 	testAwlSubnet6 = "fd00:66::/48"
-	ipForwardPath = "/proc/sys/net/ipv4/ip_forward"
+	ipForwardPath  = "/proc/sys/net/ipv4/ip_forward"
 )
 
 // ---- N1: NAT apply/teardown lifecycle ----
