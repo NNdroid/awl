@@ -174,8 +174,14 @@ func setDefaults(conf *Config, bus awlevent.Bus) {
 	if conf.VPNConfig.IPNet == "" {
 		conf.VPNConfig.IPNet = DefaultVPNNetworkSubnet
 	}
+	if conf.VPNConfig.IPNetV6 == "" {
+		conf.VPNConfig.IPNetV6 = DefaultVPNNetworkSubnet6
+	}
 	if ip, _ := conf.VPNLocalIPMask(); ip == nil {
 		conf.VPNConfig.IPNet = DefaultVPNNetworkSubnet
+	}
+	if ip, _ := conf.VPNLocalIPMaskV6(); ip == nil {
+		conf.VPNConfig.IPNetV6 = DefaultVPNNetworkSubnet6
 	}
 	if conf.VPNConfig.InterfaceName == "" {
 		if runtime.GOOS == "darwin" {

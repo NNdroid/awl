@@ -28,19 +28,20 @@ const (
 )
 
 type Device struct {
-	tun     tun.Device
-	mtu     int64
-	localIP net.IP
+	tun      tun.Device
+	mtu      int64
+	localIP  net.IP
+	localIP6 net.IP // may be nil when IPv6 is not configured
 
 	packetsPool sync.Pool
 	logger      *log.ZapEventLogger
 }
 
-func NewDevice(existingTun tun.Device, interfaceName string, localIP net.IP, ipMask net.IPMask) (*Device, error) {
+func NewDevice(existingTun tun.Device, interfaceName string, localIP net.IP, ipMask net.IPMask, localIPv6 net.IP, ipMaskv6 net.IPMask) (*Device, error) {
 	var tunDevice tun.Device
 	var err error
 	if existingTun == nil {
-		tunDevice, err = newTUN(interfaceName, InterfaceMTU, localIP, ipMask)
+		tunDevice, err = newTUN(interfaceName, InterfaceMTU, localIP, ipMask, localIPv6, ipMaskv6)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create TUN device: %v", err)
 		}
@@ -54,9 +55,10 @@ func NewDevice(existingTun tun.Device, interfaceName string, localIP net.IP, ipM
 	}
 
 	dev := &Device{
-		tun:     tunDevice,
-		mtu:     int64(realMtu),
-		localIP: localIP,
+		tun:      tunDevice,
+		mtu:      int64(realMtu),
+		localIP:  localIP,
+		localIP6: localIPv6,
 		packetsPool: sync.Pool{
 			New: func() interface{} {
 				return new(Packet)
@@ -79,8 +81,12 @@ func (d *Device) PutTempPacket(data *Packet) {
 
 func (d *Device) WritePacket(data *Packet, senderIP net.IP) error {
 	if data.IsIPv6 {
-		// TODO: implement. We need to set Device.localIP ipv6 instead of ipv4
-		return nil
+		if d.localIP6 == nil {
+			// IPv6 not configured on this device — drop silently.
+			return nil
+		}
+		copy(data.Src, senderIP)
+		copy(data.Dst, d.localIP6)
 	} else {
 		copy(data.Src, senderIP)
 		copy(data.Dst, d.localIP)
@@ -98,9 +104,15 @@ func (d *Device) WritePacket(data *Packet, senderIP net.IP) error {
 	return nil
 }
 
-// LocalIP returns the awl IP assigned to this device. Set once in NewDevice.
+// LocalIP returns the awl IPv4 address assigned to this device. Set once in NewDevice.
 func (d *Device) LocalIP() net.IP {
 	return d.localIP
+}
+
+// LocalIP6 returns the awl IPv6 address assigned to this device, or nil if
+// IPv6 is not configured. Set once in NewDevice.
+func (d *Device) LocalIP6() net.IP {
+	return d.localIP6
 }
 
 // WriteBufs writes a prepared batch of TUN packets in a single tun.Write

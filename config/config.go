@@ -78,6 +78,7 @@ type (
 		DisableVPNInterface bool   `json:"disableVPNInterface"`
 		InterfaceName       string `json:"interfaceName"`
 		IPNet               string `json:"ipNet"`
+		IPNetV6             string `json:"ipNetV6"`
 	}
 	// VPNGatewayConfig configures full-tunnel VPN gateway mode.
 	//

@@ -10,7 +10,8 @@ import (
 const (
 	DefaultVPNInterfaceName = "awl0"
 	// TODO: generate subnets if this has already taken
-	DefaultVPNNetworkSubnet = "10.66.0.1/16"
+	DefaultVPNNetworkSubnet  = "10.66.0.1/16"
+	DefaultVPNNetworkSubnet6 = "fd00:66:0::1/48"
 )
 
 func (c *Config) VPNLocalIPMask() (net.IP, net.IPMask) {
@@ -27,6 +28,25 @@ func (c *Config) VPNLocalIPMaskUnlocked() (net.IP, net.IPMask) {
 		return nil, nil
 	}
 	return localIP.To4(), ipNet.Mask
+}
+
+func (c *Config) VPNLocalIPMaskV6() (net.IP, net.IPMask) {
+	c.RLock()
+	defer c.RUnlock()
+
+	return c.VPNLocalIPMaskV6Unlocked()
+}
+
+func (c *Config) VPNLocalIPMaskV6Unlocked() (net.IP, net.IPMask) {
+	if c.VPNConfig.IPNetV6 == "" {
+		return nil, nil
+	}
+	localIP, ipNet, err := net.ParseCIDR(c.VPNConfig.IPNetV6)
+	if err != nil {
+		logger.Errorf("parse CIDR %s: %v", c.VPNConfig.IPNetV6, err)
+		return nil, nil
+	}
+	return localIP.To16(), ipNet.Mask
 }
 
 // GenerateNextIpAddr is not thread safe.

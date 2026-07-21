@@ -108,7 +108,7 @@ type NetManager interface {
 	EnableClientRoutes(tunIfName string) error
 	DisableClientRoutes() error
 	ClientRoutesActive() bool
-	EnableServerNAT(awlSubnet, tunIfName string) error
+	EnableServerNAT(awlSubnet, awlSubnet6, tunIfName string) error
 	DisableServerNAT() error
 	ServerNATActive() bool
 }
@@ -145,12 +145,16 @@ func (a *Application) Init(ctx context.Context, tunDevice tun.Device) error {
 		a.logger.Info("VPN interface is disabled from config")
 	} else {
 		localIP, netMask := a.Conf.VPNLocalIPMask()
+		localIPv6, netMaskv6 := a.Conf.VPNLocalIPMaskV6()
 		interfaceName := a.Conf.VPNConfig.InterfaceName
-		a.vpnDevice, err = vpn.NewDevice(tunDevice, interfaceName, localIP, netMask)
+		a.vpnDevice, err = vpn.NewDevice(tunDevice, interfaceName, localIP, netMask, localIPv6, netMaskv6)
 		if err != nil {
 			return fmt.Errorf("failed to init vpn: %v", err)
 		}
 		a.logger.Infof("VPN interface created. Name: %s CIDR: %s", interfaceName, &net.IPNet{IP: localIP, Mask: netMask})
+		if localIPv6 != nil {
+			a.logger.Infof("VPN interface IPv6: %s", &net.IPNet{IP: localIPv6, Mask: netMaskv6})
+		}
 
 		a.Tunnel = service.NewTunnel(a.P2p, a.vpnDevice, a.Conf, a.Eventbus)
 		go a.vpnDevice.ReadTUNPackets(a.Tunnel.HandleReadPackets)

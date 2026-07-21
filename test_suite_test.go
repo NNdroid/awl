@@ -647,7 +647,7 @@ func (m *testNetManager) ClientRoutesActive() bool {
 	return m.clientActive
 }
 
-func (m *testNetManager) EnableServerNAT(_, _ string) error {
+func (m *testNetManager) EnableServerNAT(_, _, _ string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if !m.serverActive {

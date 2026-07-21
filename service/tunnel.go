@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/ipfs/go-log/v2"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
+	"go.uber.org/zap"
 
 	"github.com/anywherelan/awl/awlevent"
 	"github.com/anywherelan/awl/config"
@@ -32,9 +34,10 @@ type Tunnel struct {
 	device *vpn.Device
 	logger *log.ZapEventLogger
 
-	isClosed         atomic.Bool
-	peersLock        sync.RWMutex
-	peerIDToPeer     map[peer.ID]*VpnPeer
+	isClosed atomic.Bool
+	peersLock    sync.RWMutex
+	peerIDToPeer map[peer.ID]*VpnPeer
+	// netIPToPeer maps both IPv4 and IPv6 string representations to a VpnPeer.
 	netIPToPeer      map[string]*VpnPeer
 	udpBroadcastAddr net.IP
 
@@ -44,7 +47,8 @@ type Tunnel struct {
 	vpnGatewayPeer          *VpnPeer // resolved VpnPeer for outbound gateway traffic; rebound on RefreshPeersList
 	vpnGatewayServerEnabled bool     // server side: we serve as a VPN gateway for others
 	// awlSubnet is set once in NewTunnel and never mutated afterwards.
-	awlSubnet *net.IPNet
+	awlSubnet  *net.IPNet
+	awlSubnet6 *net.IPNet
 
 	// gatewayConnEmitter emits awlevent.VPNGatewayConnectivityChanged. May be
 	// nil if the event bus had no emitter. vpnGatewayConnected holds the last
@@ -58,6 +62,12 @@ func NewTunnel(p2pService P2p, device *vpn.Device, conf *config.Config, eventbus
 	localIP, netMask := conf.VPNLocalIPMask()
 	awlSubnet := &net.IPNet{IP: localIP, Mask: netMask}
 	udpBroadcastAddr := vpn.GetIPv4BroadcastAddress(awlSubnet)
+
+	var awlSubnet6 *net.IPNet
+	localIPV6, netMaskV6 := conf.VPNLocalIPMaskV6()
+	if localIPV6 != nil {
+		awlSubnet6 = &net.IPNet{IP: localIPV6, Mask: netMaskV6}
+	}
 
 	emitter, err := eventbus.Emitter(new(awlevent.VPNGatewayConnectivityChanged))
 	if err != nil {
@@ -74,6 +84,7 @@ func NewTunnel(p2pService P2p, device *vpn.Device, conf *config.Config, eventbus
 		udpBroadcastAddr:        udpBroadcastAddr,
 		vpnGatewayServerEnabled: conf.VPNGateway.ServerEnabled,
 		awlSubnet:               awlSubnet,
+		awlSubnet6:              awlSubnet6,
 		gatewayConnEmitter:      emitter,
 	}
 	tunnel.RefreshPeersList()
@@ -153,6 +164,7 @@ func (t *Tunnel) RefreshPeersList() {
 			t.logger.Errorf("Known peer %q has invalid IP %s in conf", knownPeer.DisplayName(), knownPeer.IPAddr)
 			continue
 		}
+		newLocalIPv6 := peerIPv6FromIPv4(newLocalIP, t.awlSubnet, t.awlSubnet6)
 
 		prevPeer, exists := t.peerIDToPeer[peerID]
 		if exists {
@@ -162,23 +174,28 @@ func (t *Tunnel) RefreshPeersList() {
 				continue
 			}
 
-			if !oldLocalIP.Equal(newLocalIP) {
-				// changed IP
-				delete(t.netIPToPeer, string(oldLocalIP))
-				prevPeer.localIP.Store(&newLocalIP)
-				t.netIPToPeer[string(newLocalIP)] = prevPeer
-
-				continue
+			// IP changed: update both IPv4 and IPv6 mappings
+			delete(t.netIPToPeer, oldLocalIP.String())
+			if oldLocalIPv6 := peerIPv6FromIPv4(oldLocalIP, t.awlSubnet, t.awlSubnet6); oldLocalIPv6 != nil {
+				delete(t.netIPToPeer, oldLocalIPv6.String())
 			}
 
-			// impossible case
+			prevPeer.localIP.Store(&newLocalIP)
+			t.netIPToPeer[newLocalIP.String()] = prevPeer
+			if newLocalIPv6 != nil {
+				t.netIPToPeer[newLocalIPv6.String()] = prevPeer
+			}
 			continue
 		}
 
 		// add new peer
 		vpnPeer := NewVpnPeer(peerID, newLocalIP)
 		t.peerIDToPeer[peerID] = vpnPeer
-		t.netIPToPeer[string(newLocalIP)] = vpnPeer
+		t.netIPToPeer[newLocalIP.String()] = vpnPeer
+		if newLocalIPv6 != nil {
+			t.netIPToPeer[newLocalIPv6.String()] = vpnPeer
+			t.logger.Debugf("mapping peer %s (%s) to IPv6 %s", peerID, newLocalIP, newLocalIPv6)
+		}
 		vpnPeer.Start(t)
 	}
 
@@ -189,9 +206,13 @@ func (t *Tunnel) RefreshPeersList() {
 			continue
 		}
 		localIP := *vpnPeer.localIP.Load()
+		localIPv6 := peerIPv6FromIPv4(localIP, t.awlSubnet, t.awlSubnet6)
 		vpnPeer.Close(t)
 		delete(t.peerIDToPeer, vpnPeer.peerID)
-		delete(t.netIPToPeer, string(localIP))
+		delete(t.netIPToPeer, localIP.String())
+		if localIPv6 != nil {
+			delete(t.netIPToPeer, localIPv6.String())
+		}
 	}
 
 	// Rebind gateway pointer to the (possibly new) VpnPeer for the configured gateway peer.
@@ -227,9 +248,13 @@ func (t *Tunnel) Close() {
 
 	for _, vpnPeer := range t.peerIDToPeer {
 		localIP := *vpnPeer.localIP.Load()
+		localIPv6 := peerIPv6FromIPv4(localIP, t.awlSubnet, t.awlSubnet6)
 		vpnPeer.Close(t)
 		delete(t.peerIDToPeer, vpnPeer.peerID)
-		delete(t.netIPToPeer, string(localIP))
+		delete(t.netIPToPeer, localIP.String())
+		if localIPv6 != nil {
+			delete(t.netIPToPeer, localIPv6.String())
+		}
 	}
 }
 
@@ -246,43 +271,26 @@ func (t *Tunnel) HandleReadPackets(packets []*vpn.Packet) {
 		if packet == nil {
 			continue
 		}
-		// TODO: ipv6 support
-		if packet.IsIPv6 {
-			continue
-		}
 
-		// TODO: ipv6 support
-		if packet.Dst.Equal(t.udpBroadcastAddr) || packet.Dst.Equal(net.IPv4bcast) {
-			// udp broadcast
-
-			for _, vpnPeer := range t.netIPToPeer {
-				// TODO: replace with event-based check OnConnected/OnDisconnected to improve performance
-				if !t.p2p.IsConnected(vpnPeer.peerID) {
-					continue
-				}
-
-				copyPacket := t.device.GetTempPacket()
-				packet.CopyTo(copyPacket)
-
-				select {
-				case vpnPeer.outboundCh <- copyPacket:
-				default:
-					t.device.PutTempPacket(copyPacket)
-				}
-			}
-
-			continue
-		}
-
-		vpnPeer, ok := t.netIPToPeer[string(packet.Dst)]
-		if ok {
+		// P2P broadcast/unicast lookup
+		vpnPeer, isP2P := t.netIPToPeer[packet.Dst.String()]
+		if isP2P {
 			// VPN gateway server: tag NAT-returned packets so the client peer
 			// applies a dst-only rewrite on receive. Discriminator: peer is
 			// our gateway client AND src is outside our awl subnet (i.e. came
 			// from the internet via NAT, not our own p2p initiative to the
 			// same peer). Subnet check is local to this side — no cross-side
 			// dependency on the client's awl subnet.
-			if vpnPeer.weAllowUsingAsExitNode.Load() && t.vpnGatewayServerEnabled && !t.awlSubnet.Contains(packet.Src) {
+			var srcFromInternet bool
+			if packet.IsIPv6 {
+				if t.awlSubnet6 != nil {
+					srcFromInternet = !t.awlSubnet6.Contains(packet.Src)
+				}
+			} else {
+				srcFromInternet = !t.awlSubnet.Contains(packet.Src)
+			}
+
+			if vpnPeer.weAllowUsingAsExitNode.Load() && t.vpnGatewayServerEnabled && srcFromInternet {
 				packet.GatewayDir = vpn.GatewayDirReturn
 			}
 			select {
@@ -294,12 +302,35 @@ func (t *Tunnel) HandleReadPackets(packets []*vpn.Packet) {
 			continue
 		}
 
+		// IPv4 broadcast
+		if !packet.IsIPv6 && (packet.Dst.Equal(t.udpBroadcastAddr) || packet.Dst.Equal(net.IPv4bcast)) {
+			for _, vpnPeer := range t.peerIDToPeer {
+				if !t.p2p.IsConnected(vpnPeer.peerID) {
+					continue
+				}
+				copyPacket := t.device.GetTempPacket()
+				packet.CopyTo(copyPacket)
+				select {
+				case vpnPeer.outboundCh <- copyPacket:
+				default:
+					t.device.PutTempPacket(copyPacket)
+				}
+			}
+			continue
+		}
+
 		// VPN gateway client mode: forward non-local packets to the gateway peer.
-		// Subnet check is local to this side — it picks which packets go through
-		// the gateway vs. drop. The Forward tag carries the intent on the wire
-		// so the server doesn't have to re-derive it from packet IPs.
 		if t.vpnGatewayClientEnabled && t.vpnGatewayPeer != nil {
-			if isNonRoutableIP(packet.Dst) || t.awlSubnet.Contains(packet.Dst) {
+			var isAWLSubnet bool
+			if packet.IsIPv6 {
+				if t.awlSubnet6 != nil {
+					isAWLSubnet = t.awlSubnet6.Contains(packet.Dst)
+				}
+			} else {
+				isAWLSubnet = t.awlSubnet.Contains(packet.Dst)
+			}
+
+			if isNonRoutableIP(packet.Dst) || isAWLSubnet {
 				continue
 			}
 			packet.GatewayDir = vpn.GatewayDirForward
@@ -309,6 +340,7 @@ func (t *Tunnel) HandleReadPackets(packets []*vpn.Packet) {
 			default:
 				metrics.VPNPacketsDroppedTotal.WithLabelValues("gateway_channel_full").Inc()
 			}
+			continue
 		}
 	}
 }
@@ -700,16 +732,24 @@ func (t *Tunnel) writeInboundBatch(packets []*vpn.Packet, bufs [][]byte, senderI
 	isOurGateway := t.vpnGatewayClientEnabled && vp.peerID == t.vpnGatewayPeerID
 	t.peersLock.RUnlock()
 
-	localIP := t.device.LocalIP()
+	localIPv4, _ := t.conf.VPNLocalIPMask()
+	localIPv6, _ := t.conf.VPNLocalIPMaskV6()
 
 	allowGateway := vp.weAllowUsingAsExitNode.Load()
 
 	for _, packet := range packets {
+		var localIP net.IP
+		var senderIPv6 net.IP
 		if packet.IsIPv6 {
-			// TODO: IPv6 — currently dropped at TUN write. Both the regular
-			//  awl rewrite and the gateway rewrites need IPv6 support.
-			continue
+			localIP = localIPv6
+			senderIPv6 = peerIPv6FromIPv4(senderIP, t.awlSubnet, t.awlSubnet6)
+		} else {
+			localIP = localIPv4
 		}
+		if localIP == nil {
+			continue // No local IP for this family
+		}
+
 		switch packet.GatewayDir {
 		case vpn.GatewayDirForward:
 			if !serverEnabled {
@@ -720,8 +760,15 @@ func (t *Tunnel) writeInboundBatch(packets []*vpn.Packet, bufs [][]byte, senderI
 				metrics.VPNPacketsDroppedTotal.WithLabelValues("gateway_not_allowed").Inc()
 				continue
 			}
-			copy(packet.Src, senderIP)
-			// dst preserved
+			if packet.IsIPv6 {
+				if senderIPv6 == nil {
+					continue
+				}
+				copy(packet.Src, senderIPv6)
+			} else {
+				copy(packet.Src, senderIP)
+			}
+			// dst preserved (internet destination)
 		case vpn.GatewayDirReturn:
 			if !isOurGateway {
 				metrics.VPNPacketsDroppedTotal.WithLabelValues("gateway_return_from_non_gateway").Inc()
@@ -729,8 +776,15 @@ func (t *Tunnel) writeInboundBatch(packets []*vpn.Packet, bufs [][]byte, senderI
 			}
 			copy(packet.Dst, localIP)
 			// src preserved
-		default:
-			copy(packet.Src, senderIP)
+		default: // P2P
+			if packet.IsIPv6 {
+				if senderIPv6 == nil {
+					continue
+				}
+				copy(packet.Src, senderIPv6)
+			} else {
+				copy(packet.Src, senderIP)
+			}
 			copy(packet.Dst, localIP)
 		}
 		packet.RecalculateChecksum()
@@ -741,12 +795,6 @@ func (t *Tunnel) writeInboundBatch(packets []*vpn.Packet, bufs [][]byte, senderI
 }
 
 // isNonRoutableIP returns true for IPs that should not be forwarded through the gateway.
-//
-// TODO(gateway): add client-side drop of
-// private destinations (10/8, 172.16/12, 192.168/16, CGNAT, link-local)
-// before sending to the gateway: fast local refusal instead of a silent drop
-// at the exit node's filter. Not a replacement for the server-side filtering
-// (iptables on Linux, WFP on Windows) — the server cannot trust clients.
 func isNonRoutableIP(ip net.IP) bool {
 	return ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast()
 }
@@ -768,4 +816,78 @@ func readBatchFromChan(ch chan *vpn.Packet, buf []*vpn.Packet, offset int) []*vp
 			return buf[:i]
 		}
 	}
+}
+
+// peerIPv6FromIPv4 derives a peer's IPv6 address from their IPv4 address
+// by taking the host portion of the IPv4 address (unmasked by the IPv4 subnet)
+// and mapping it into the custom IPv6 subnet.
+// Returns nil if subnets are invalid, if peerIPv4 is out of bounds, 
+// or if the IPv6 subnet capacity is smaller than the IPv4 subnet capacity.
+func peerIPv6FromIPv4(peerIPv4 net.IP, awlSubnet4 *net.IPNet, awlSubnet6 *net.IPNet) net.IP {
+	if awlSubnet4 == nil || awlSubnet6 == nil {
+		return nil
+	}
+	v4 := peerIPv4.To4()
+	if v4 == nil {
+		return nil
+	}
+
+	// Get and validate subnet mask lengths (IPv4: 0-32, IPv6: 0-128)
+	v4MaskLen, v4Bits := awlSubnet4.Mask.Size()
+	v6MaskLen, v6Bits := awlSubnet6.Mask.Size()
+	if v4Bits != 32 || v6Bits != 128 {
+		return nil
+	}
+
+	// Capacity check: If IPv4 host bits exceed IPv6 host bits, 
+	// the IPv6 subnet cannot accommodate all addresses of the IPv4 subnet.
+	v4HostBits := 32 - v4MaskLen
+	v6HostBits := 128 - v6MaskLen
+	if v4HostBits > v6HostBits {
+		return nil
+	}
+
+	// Ensure the given IPv4 address actually belongs to the IPv4 subnet
+	if !awlSubnet4.Contains(v4) {
+		return nil
+	}
+
+	// Extract the IPv4 host offset (unmasked / host part)
+	v4Mask := awlSubnet4.Mask
+	hostOffsetV4 := make(net.IP, net.IPv4len)
+	for i := 0; i < net.IPv4len; i++ {
+		hostOffsetV4[i] = v4[i] &^ v4Mask[i]
+	}
+
+	// Normalize the base IPv6 subnet (prefix mask alignment)
+	baseV6 := awlSubnet6.IP.Mask(awlSubnet6.Mask).To16()
+	if baseV6 == nil {
+		return nil
+	}
+
+	// Align and embed the IPv4 host offset into the tail of the IPv6 address.
+	// Since capacity is already verified (v4HostBits <= v6HostBits), 
+	// the IPv4 bytes safely fit into the trailing bytes of the IPv6 address.
+	addr := make(net.IP, net.IPv6len)
+	copy(addr, baseV6)
+
+	for i := 0; i < net.IPv4len; i++ {
+		v6Index := 12 + i // The last 4 bytes of IPv6 (indices 12, 13, 14, 15)
+		addr[v6Index] |= hostOffsetV4[i]
+	}
+
+	return addr
+}
+
+func (t *Tunnel) logRoutingTable() {
+	if !t.logger.Desugar().Core().Enabled(zap.DebugLevel) {
+		return
+	}
+	// The caller HandleReadPackets already holds the RLock, so we don't need to take it again.
+	routes := make([]string, 0, len(t.netIPToPeer))
+	for ip, peer := range t.netIPToPeer {
+		routes = append(routes, fmt.Sprintf("  %s -> %s", ip, peer.peerID))
+	}
+	// Use a single log call to avoid interleaving
+	t.logger.Debug("Dumping IPv4/IPv6 routing table:\n" + strings.Join(routes, "\n"))
 }
