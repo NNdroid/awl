@@ -12,8 +12,8 @@ import (
 )
 
 const (
-	IPProtocolTCP   = 6
-	IPProtocolUDP   = 17
+	IPProtocolTCP    = 6
+	IPProtocolUDP    = 17
 	IPProtocolICMPv6 = 58
 
 	ipv4offsetChecksum = 10
@@ -277,7 +277,6 @@ func checksumIPv6TCPUDP(headerAndPayload []byte, protocol uint32, srcIP net.IP, 
 
 	return tcpipChecksum(headerAndPayload, csum)
 }
-
 
 // Calculate the TCP/IP checksum defined in rfc1071. The passed-in csum is any
 // initial checksum data that's already been computed.

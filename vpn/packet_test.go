@@ -28,7 +28,7 @@ func TestPacket_RecalculateChecksum_IPv6(t *testing.T) {
 	packet.RecalculateChecksum()
 	// Just verify it doesn't crash and actually modifies the checksum if it was 0000
 	a.NotEqual(rawData, packet.Packet)
-	
+
 	// Test idempotency
 	firstRecalculate := append([]byte(nil), packet.Packet...)
 	packet.RecalculateChecksum()

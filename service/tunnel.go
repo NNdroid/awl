@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -14,7 +13,6 @@ import (
 	"github.com/ipfs/go-log/v2"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
-	"go.uber.org/zap"
 
 	"github.com/anywherelan/awl/awlevent"
 	"github.com/anywherelan/awl/config"
@@ -34,7 +32,7 @@ type Tunnel struct {
 	device *vpn.Device
 	logger *log.ZapEventLogger
 
-	isClosed atomic.Bool
+	isClosed     atomic.Bool
 	peersLock    sync.RWMutex
 	peerIDToPeer map[peer.ID]*VpnPeer
 	// netIPToPeer maps both IPv4 and IPv6 string representations to a VpnPeer.
@@ -821,7 +819,7 @@ func readBatchFromChan(ch chan *vpn.Packet, buf []*vpn.Packet, offset int) []*vp
 // peerIPv6FromIPv4 derives a peer's IPv6 address from their IPv4 address
 // by taking the host portion of the IPv4 address (unmasked by the IPv4 subnet)
 // and mapping it into the custom IPv6 subnet.
-// Returns nil if subnets are invalid, if peerIPv4 is out of bounds, 
+// Returns nil if subnets are invalid, if peerIPv4 is out of bounds,
 // or if the IPv6 subnet capacity is smaller than the IPv4 subnet capacity.
 func peerIPv6FromIPv4(peerIPv4 net.IP, awlSubnet4 *net.IPNet, awlSubnet6 *net.IPNet) net.IP {
 	if awlSubnet4 == nil || awlSubnet6 == nil {
@@ -839,7 +837,7 @@ func peerIPv6FromIPv4(peerIPv4 net.IP, awlSubnet4 *net.IPNet, awlSubnet6 *net.IP
 		return nil
 	}
 
-	// Capacity check: If IPv4 host bits exceed IPv6 host bits, 
+	// Capacity check: If IPv4 host bits exceed IPv6 host bits,
 	// the IPv6 subnet cannot accommodate all addresses of the IPv4 subnet.
 	v4HostBits := 32 - v4MaskLen
 	v6HostBits := 128 - v6MaskLen
@@ -866,7 +864,7 @@ func peerIPv6FromIPv4(peerIPv4 net.IP, awlSubnet4 *net.IPNet, awlSubnet6 *net.IP
 	}
 
 	// Align and embed the IPv4 host offset into the tail of the IPv6 address.
-	// Since capacity is already verified (v4HostBits <= v6HostBits), 
+	// Since capacity is already verified (v4HostBits <= v6HostBits),
 	// the IPv4 bytes safely fit into the trailing bytes of the IPv6 address.
 	addr := make(net.IP, net.IPv6len)
 	copy(addr, baseV6)
@@ -877,17 +875,4 @@ func peerIPv6FromIPv4(peerIPv4 net.IP, awlSubnet4 *net.IPNet, awlSubnet6 *net.IP
 	}
 
 	return addr
-}
-
-func (t *Tunnel) logRoutingTable() {
-	if !t.logger.Desugar().Core().Enabled(zap.DebugLevel) {
-		return
-	}
-	// The caller HandleReadPackets already holds the RLock, so we don't need to take it again.
-	routes := make([]string, 0, len(t.netIPToPeer))
-	for ip, peer := range t.netIPToPeer {
-		routes = append(routes, fmt.Sprintf("  %s -> %s", ip, peer.peerID))
-	}
-	// Use a single log call to avoid interleaving
-	t.logger.Debug("Dumping IPv4/IPv6 routing table:\n" + strings.Join(routes, "\n"))
 }

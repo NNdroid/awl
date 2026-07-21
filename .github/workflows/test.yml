@@ -129,7 +129,7 @@ jobs:
           ./librespeed-cli --local-json config_librespeed.json --server 2 --json --share --telemetry-level disabled | python3 -m json.tool
 
           ping 10.66.0.2 -w 20 -c 10
-          ping6 fd00:66:0::2 -w 20 -c 10 || true
+          ping6 fd00:66:0::2 -w 20 -c 10
           # TODO: remove this temporal hack for linux
           ping awl-tester.awl -w 20 -c 10 || true
 
@@ -232,6 +232,7 @@ jobs:
           ./librespeed-cli --local-json config_librespeed.json --server 2 --json --share --telemetry-level disabled | python3 -m json.tool
 
           ping 10.66.0.2 -c 10
+          ping6 fd00:66:0::2 -c 10
           ping awl-tester.awl -c 10
 
           sleep 1
@@ -252,6 +253,7 @@ jobs:
           ./librespeed-cli.exe --local-json config_librespeed.json --server 2 --json --share --telemetry-level disabled | python3 -m json.tool
 
           ping -w 20000 -n 10 10.66.0.2
+          ping -6 -w 20000 -n 10 fd00:66:0::2
           ping -w 20000 -n 10 -a awl-tester.awl
 
           # ---- VPN gateway server (exit-node) mode: runtime enable/disable round-trips OS state ----

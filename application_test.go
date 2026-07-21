@@ -795,51 +795,6 @@ func TestUpdatePeerSettingsIPAddr(t *testing.T) {
 		ts.NoError(err)
 	})
 
-	t.Run("IPv6TunnelPackets", func(t *testing.T) {
-		const packetSize = 1500
-		const packetsCount = 10
-
-		peer2Config, err := peer1.api.KnownPeerConfig(peer2.PeerID())
-		ts.NoError(err)
-		
-		peer2IPv4 := net.ParseIP(peer2Config.IPAddr).To4()
-		ts.NotNil(peer2IPv4)
-		
-		awlSubnet4, err := netip.ParsePrefix(peer1.app.Conf.VPNConfig.IPNet)
-		ts.NoError(err)
-		awlSubnet6, err := netip.ParsePrefix(peer1.app.Conf.VPNConfig.IPNetV6)
-		ts.NoError(err)
-		
-		// Map IPv4 to IPv6 using the same logic as peerIPv6FromIPv4
-		peer2IPv6 := make(net.IP, net.IPv6len)
-		copy(peer2IPv6, awlSubnet6.Addr().AsSlice())
-		v4Mask := net.CIDRMask(awlSubnet4.Bits(), 32)
-		for i := 0; i < net.IPv4len; i++ {
-			peer2IPv6[12+i] |= peer2IPv4[i] &^ v4Mask[i]
-		}
-
-		// Configure tunnel for packet testing
-		peer1.tun.SetInboundCapture(packetSize, nil)
-		peer2.tun.SetInboundCapture(packetSize, nil)
-		peer1.tun.ClearInboundCount()
-		peer2.tun.ClearInboundCount()
-
-		// Wait for IP map to be ready
-		time.Sleep(100 * time.Millisecond)
-
-		// Send IPv6 packets from peer1 to peer2
-		packet := testPacketWithDestV6(packetSize, peer2IPv6.String())
-		for i := 0; i < packetsCount; i++ {
-			peer1.tun.Outbound <- [][]byte{packet}
-		}
-
-		// Wait for packet processing
-		time.Sleep(500 * time.Millisecond)
-
-		// Verify packet reception
-		received := peer2.tun.InboundCount()
-		ts.EqualValues(packetsCount, received)
-	})
 }
 
 func TestDisableVPNInterface(t *testing.T) {
@@ -980,6 +935,50 @@ func TestTunnelPackets(t *testing.T) {
 	received2 := peer2.tun.InboundCount()
 	ts.EqualValues(packetsCount, received1)
 	ts.EqualValues(packetsCount, received2)
+
+	// --- IPv6 Routing Test ---
+	peer2ConfigInPeer1, _ := peer1.app.Conf.GetPeer(peer2.PeerID())
+	peer2IPv4 := net.ParseIP(peer2ConfigInPeer1.IPAddr).To4()
+
+	peer1ConfigInPeer2, _ := peer2.app.Conf.GetPeer(peer1.PeerID())
+	peer1IPv4 := net.ParseIP(peer1ConfigInPeer2.IPAddr).To4()
+
+	awlSubnet4, _ := netip.ParsePrefix(peer1.app.Conf.VPNConfig.IPNet)
+	awlSubnet6, _ := netip.ParsePrefix(peer1.app.Conf.VPNConfig.IPNetV6)
+	v4Mask := net.CIDRMask(awlSubnet4.Bits(), 32)
+	awlNet6 := &net.IPNet{IP: awlSubnet6.Addr().AsSlice(), Mask: net.CIDRMask(awlSubnet6.Bits(), 128)}
+	baseV6 := awlNet6.IP.Mask(awlNet6.Mask).To16()
+
+	peer1IPv6 := make(net.IP, net.IPv6len)
+	copy(peer1IPv6, baseV6)
+	for i := 0; i < net.IPv4len; i++ {
+		peer1IPv6[12+i] |= peer1IPv4[i] &^ v4Mask[i]
+	}
+
+	peer2IPv6 := make(net.IP, net.IPv6len)
+	copy(peer2IPv6, baseV6)
+	for i := 0; i < net.IPv4len; i++ {
+		peer2IPv6[12+i] |= peer2IPv4[i] &^ v4Mask[i]
+	}
+
+	ts.t.Logf("DEBUG: peer1 IPNetV6: %v", peer1.app.Conf.VPNConfig.IPNetV6)
+	ts.t.Logf("DEBUG: peer1IPv6 calculated: %s, peer2IPv6 calculated: %s", peer1IPv6.String(), peer2IPv6.String())
+
+	peer1.tun.ClearInboundCount()
+	peer2.tun.ClearInboundCount()
+
+	// Send IPv6 packets from peer1 to peer2
+	const ipv6PacketsCount = 10
+	ipv6Packet := testPacketWithSrcDestV6(packetSize, peer1IPv6.String(), peer2IPv6.String())
+
+	for i := 0; i < ipv6PacketsCount; i++ {
+		peer1.tun.Outbound <- [][]byte{ipv6Packet}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	time.Sleep(1 * time.Second)
+	receivedIPv6 := peer2.tun.InboundCount()
+	ts.EqualValues(ipv6PacketsCount, receivedIPv6, "peer2 should receive exactly %d IPv6 packets", ipv6PacketsCount)
 }
 
 func BenchmarkTunnelPackets(b *testing.B) {

@@ -46,9 +46,9 @@ func TestPeerIPv6FromIPv4(t *testing.T) {
 		{
 			name:       "capacity mismatch v4 host bits > v6 host bits",
 			peerIPv4:   "10.66.0.5",
-			awlSubnet4: "10.66.0.0/16", // 16 host bits
+			awlSubnet4: "10.66.0.0/16",  // 16 host bits
 			awlSubnet6: "fd00:66::/120", // 8 host bits
-			expected:   "", // expected nil
+			expected:   "",              // expected nil
 		},
 		{
 			name:       "invalid mask lengths (v4)",

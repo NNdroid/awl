@@ -208,7 +208,7 @@ func setupIptables6(ipt6 *iptables.IPTables, state *natState) error {
 			return fmt.Errorf("add IPv6 DROP rule for %s to %s: %w", priv, awlForwardChain6, err)
 		}
 	}
-	
+
 	if err := ipt6.Append("filter", awlForwardChain6, "-j", "ACCEPT"); err != nil {
 		return fmt.Errorf("add ACCEPT rule to %s: %w", awlForwardChain6, err)
 	}

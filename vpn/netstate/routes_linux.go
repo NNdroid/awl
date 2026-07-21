@@ -5,9 +5,9 @@ package netstate
 import (
 	"errors"
 	"fmt"
+	"golang.org/x/sys/unix"
 	"net"
 	"syscall"
-	"golang.org/x/sys/unix"
 
 	"github.com/vishvananda/netlink"
 )

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -549,8 +550,8 @@ func testPacket(length int) []byte {
 	return testPacketWithDest(length, "10.66.0.2")
 }
 
-func testPacketWithSrcDest(length int, srcIP, destIP string) []byte {
-	data, err := hex.DecodeString("4500002828f540004011fd490a4200010a420002a9d0238200148bfd68656c6c6f20776f726c6421")
+func buildPacketFromHex(length int, srcIP, destIP net.IP, hexStr string) []byte {
+	data, err := hex.DecodeString(hexStr)
 	if err != nil {
 		panic(err)
 	}
@@ -572,21 +573,28 @@ func testPacketWithSrcDest(length int, srcIP, destIP string) []byte {
 	}
 	vpnPacket.Parse()
 
-	srcIPParsed := net.ParseIP(srcIP).To4()
-	if srcIPParsed == nil {
-		panic(fmt.Sprintf("invalid source IP: %s", srcIP))
+	if srcIP != nil {
+		copy(vpnPacket.Src, srcIP)
 	}
-	copy(vpnPacket.Src, srcIPParsed)
-
-	destIPParsed := net.ParseIP(destIP).To4()
-	if destIPParsed == nil {
-		panic(fmt.Sprintf("invalid destination IP: %s", destIP))
+	if destIP != nil {
+		copy(vpnPacket.Dst, destIP)
 	}
-	copy(vpnPacket.Dst, destIPParsed)
 
 	vpnPacket.RecalculateChecksum()
 
 	return vpnPacket.Packet
+}
+
+func testPacketWithSrcDest(length int, srcIP, destIP string) []byte {
+	srcIPParsed := net.ParseIP(srcIP).To4()
+	if srcIPParsed == nil {
+		panic(fmt.Sprintf("invalid source IP: %s", srcIP))
+	}
+	destIPParsed := net.ParseIP(destIP).To4()
+	if destIPParsed == nil {
+		panic(fmt.Sprintf("invalid destination IP: %s", destIP))
+	}
+	return buildPacketFromHex(length, srcIPParsed, destIPParsed, "4500002828f540004011fd490a4200010a420002a9d0238200148bfd68656c6c6f20776f726c6421")
 }
 
 func testPacketWithDest(length int, destIP string) []byte {
@@ -594,47 +602,28 @@ func testPacketWithDest(length int, destIP string) []byte {
 }
 
 func testPacketWithSrcDestV6(length int, srcIP, destIP string) []byte {
-	data, err := hex.DecodeString("6000000000141140fd000000000000000000000000000001fd00000000000000000000000000000204d2162e0014000068656c6c6f20776f726c6421")
-	if err != nil {
-		panic(err)
-	}
-
-	packet := data
-	if length > len(data) {
-		packet = make([]byte, length)
-		copy(packet, data)
-		_, err = rand.Read(packet[len(data):])
-		if err != nil {
-			panic(err)
-		}
-	}
-
-	vpnPacket := vpn.Packet{}
-	_, err = vpnPacket.ReadFrom(bytes.NewReader(packet))
-	if err != nil {
-		panic(err)
-	}
-	vpnPacket.Parse()
-
 	srcIPParsed := net.ParseIP(srcIP).To16()
 	if srcIPParsed == nil {
 		panic(fmt.Sprintf("invalid source IPv6: %s", srcIP))
 	}
-	copy(vpnPacket.Src, srcIPParsed)
-
 	destIPParsed := net.ParseIP(destIP).To16()
 	if destIPParsed == nil {
 		panic(fmt.Sprintf("invalid destination IPv6: %s", destIP))
 	}
-	copy(vpnPacket.Dst, destIPParsed)
+	packet := buildPacketFromHex(length, srcIPParsed, destIPParsed, "6000000000141140fd000000000000000000000000000001fd00000000000000000000000000000204d2162e0014000068656c6c6f20776f726c6421")
+	if length > 40 {
+		payloadLen := uint16(length - 40)
+		binary.BigEndian.PutUint16(packet[4:], payloadLen)
+		binary.BigEndian.PutUint16(packet[44:], payloadLen)
 
-	vpnPacket.RecalculateChecksum()
-
-	return vpnPacket.Packet
-}
-
-func testPacketWithDestV6(length int, destIP string) []byte {
-	return testPacketWithSrcDestV6(length, "fd00:66:0::1", destIP)
+		// Recalculate checksum after modifying lengths
+		vpnPacket := vpn.Packet{}
+		vpnPacket.Packet = packet
+		if vpnPacket.Parse() {
+			vpnPacket.RecalculateChecksum()
+		}
+	}
+	return packet
 }
 
 // parsePacketIPs extracts src and dst IPs from a raw IPv4 packet.
