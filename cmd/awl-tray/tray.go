@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"slices"
 	"sort"
+	"time"
 
 	"fyne.io/systray"
 	"github.com/GrigoryKrasnochub/updaterini"
@@ -96,6 +97,21 @@ func initTray() {
 	go func() {
 		// Workaround for windows only
 		for range systray.TrayOpenedCh {
+			if app == nil {
+				continue
+			}
+			refreshPeersSubmenus()
+			proxyRouting.refresh()
+			gatewayRouting.refresh()
+		}
+	}()
+
+	// Periodically refresh all dynamic submenus so the displayed state stays
+	// current even when the user keeps the tray open without clicking anything.
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
 			if app == nil {
 				continue
 			}

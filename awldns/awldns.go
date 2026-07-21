@@ -189,7 +189,17 @@ func (r *Resolver) dnsLocalDomainHandler(resp dns.ResponseWriter, req *dns.Msg) 
 				m.SetRcode(req, dns.RcodeNameError)
 				continue
 			}
-			// TODO: support IPv6 addresses in cfg.directMapping.
+			if ip := net.ParseIP(mappedIP); ip != nil && ip.To4() == nil { // It's an IPv6 address
+				m.Answer = append(m.Answer, &dns.AAAA{
+					Hdr: dns.RR_Header{
+						Name:   hostname,
+						Rrtype: dns.TypeAAAA,
+						Class:  dns.ClassINET,
+						Ttl:    defaultTTLSeconds,
+					},
+					AAAA: ip.To16(),
+				})
+			}
 		}
 	}
 

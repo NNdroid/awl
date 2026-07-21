@@ -64,6 +64,7 @@ type VPNGateway struct {
 	netManager NetManager
 	dns        DNSReconfigurer
 	logger     *log.ZapEventLogger
+	nat66      *nat66Engine
 
 	// mu serialises apply/teardown transactions (config + tunnel binding +
 	// DNS + manager calls) across the API, startup and shutdown paths.
@@ -90,22 +91,19 @@ func NewVPNGateway(conf *config.Config, tunnel *Tunnel, device *vpn.Device, p2p 
 // VPNGatewayClientSupported reports whether client-side VPN gateway mode can run on this OS/build.
 func VPNGatewayClientSupported() error {
 	switch runtime.GOOS {
-	case "linux", "android", "windows":
+	case "linux", "android", "windows", "darwin":
 		return nil
-	case "darwin":
-		return fmt.Errorf("VPN gateway client mode is not yet supported on macOS")
 	default:
 		return fmt.Errorf("VPN gateway client mode is not supported on %s", runtime.GOOS)
 	}
 }
 
 // VPNGatewayServerSupported reports whether server-side VPN gateway mode can
-// run on this OS/build. Linux (iptables NAT) and Windows (WFP + WinNAT);
-// Android exit-node support requires root or special system config, macOS
-// lacks NAT/route glue.
+// run on this OS/build. Linux uses ip6tables MASQUERADE; Windows uses WFP +
+// WinNAT; macOS uses pf MASQUERADE (IPv4) + userspace nat66Engine (IPv6).
 func VPNGatewayServerSupported() error {
 	switch runtime.GOOS {
-	case "linux", "windows":
+	case "linux", "windows", "darwin":
 		return nil
 	default:
 		return fmt.Errorf("VPN gateway server mode is not supported on %s", runtime.GOOS)
@@ -277,6 +275,13 @@ func (g *VPNGateway) SetupAtStartup() error {
 // persisted config — the daemon should resume gateway mode on next start with
 // the same gateway peer.
 func (g *VPNGateway) TeardownAtShutdown() {
+	if g.nat66 != nil {
+		if g.tunnel != nil {
+			g.tunnel.SetIPv6Forwarder(nil)
+		}
+		_ = g.nat66.Close()
+		g.nat66 = nil
+	}
 	g.teardownClient()
 	g.teardownServer()
 }
@@ -329,6 +334,18 @@ func (g *VPNGateway) applyServer() error {
 		return err
 	}
 	g.logger.Infof("VPN gateway server NAT configured for subnet %s (IPv6: %q) on %s", awlSubnet, awlSubnet6, tunName)
+
+	// Start userspace NAT66 engine for IPv6 gateway forwarding. On non-Windows
+	// this returns nil (kernel handles NAT66 via ip6tables).
+	if g.tunnel != nil {
+		nat66 := newNAT66Engine(g.device, g.tunnel.nat66Return)
+		if nat66 != nil {
+			g.tunnel.SetIPv6Forwarder(nat66)
+			g.nat66 = nat66
+			g.logger.Infof("NAT66 engine started for IPv6 gateway forwarding")
+		}
+	}
+
 	return nil
 }
 
@@ -336,6 +353,14 @@ func (g *VPNGateway) applyServer() error {
 func (g *VPNGateway) teardownServer() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+
+	if g.nat66 != nil {
+		if g.tunnel != nil {
+			g.tunnel.SetIPv6Forwarder(nil)
+		}
+		_ = g.nat66.Close()
+		g.nat66 = nil
+	}
 
 	if err := g.netManager.DisableServerNAT(); err != nil {
 		g.logger.Errorf("teardown NAT: %v", err)

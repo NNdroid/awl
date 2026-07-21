@@ -51,6 +51,10 @@ type Tunnel struct {
 	awlSubnet  *net.IPNet
 	awlSubnet6 *net.IPNet
 
+	// ipv6Forwarder handles IPv6 gateway forwarding on Windows where kernel
+	// NAT66 is unavailable. Nil on Linux/other (kernel ip6tables handles it).
+	ipv6Forwarder GatewayIPv6Forwarder
+
 	// gatewayConnEmitter emits awlevent.VPNGatewayConnectivityChanged. May be
 	// nil if the event bus had no emitter. vpnGatewayConnected holds the last
 	// emitted connectivity state so onPeerConnected/onPeerDisconnected only fire
@@ -257,6 +261,15 @@ func (t *Tunnel) Close() {
 			delete(t.netIPToPeer, localIPv6.String())
 		}
 	}
+}
+
+// SetIPv6Forwarder sets (or clears) the IPv6 gateway forwarder. When set,
+// IPv6 GatewayDirForward packets are diverted to it instead of being written
+// to TUN. Thread-safe (takes peersLock).
+func (t *Tunnel) SetIPv6Forwarder(f GatewayIPv6Forwarder) {
+	t.peersLock.Lock()
+	defer t.peersLock.Unlock()
+	t.ipv6Forwarder = f
 }
 
 // HandleReadPackets for successfully handled packets it sets packet in slice as nil
@@ -775,6 +788,12 @@ func (t *Tunnel) writeInboundBatch(packets []*vpn.Packet, bufs [][]byte, senderI
 					continue
 				}
 				copy(packet.Src, senderIPv6)
+				if t.ipv6Forwarder != nil {
+					// Divert to userspace NAT66 engine (Windows). The forwarder
+					// takes ownership of the packet (returns it to pool when done).
+					t.ipv6Forwarder.ForwardIPv6(packet, senderIP)
+					continue
+				}
 			} else {
 				copy(packet.Src, senderIP)
 			}
@@ -895,6 +914,23 @@ func (t *Tunnel) handleMagicDNSForward(packet *vpn.Packet) {
 		_ = t.device.WriteBufs([][]byte{respPacket.Buf()})
 		t.device.PutTempPacket(respPacket)
 	}()
+}
+
+// nat66Return routes a return packet from the NAT66 engine back to a gateway
+// client peer. Called from the NAT66 engine's goroutines; takes peersLock.
+func (t *Tunnel) nat66Return(packet *vpn.Packet, clientIPv4 net.IP) {
+	t.peersLock.RLock()
+	vpnPeer, ok := t.netIPToPeer[clientIPv4.String()]
+	t.peersLock.RUnlock()
+	if !ok {
+		t.device.PutTempPacket(packet)
+		return
+	}
+	select {
+	case vpnPeer.outboundCh <- packet:
+	default:
+		t.device.PutTempPacket(packet)
+	}
 }
 
 func readBatchFromChan(ch chan *vpn.Packet, buf []*vpn.Packet, offset int) []*vpn.Packet {

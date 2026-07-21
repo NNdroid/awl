@@ -58,6 +58,18 @@ func newTUN(ifname string, mtu int, localIP net.IP, ipMask net.IPMask, localIPv6
 			"prefixlen", fmt.Sprintf("%d", prefixLen)).CombinedOutput(); err != nil {
 			return nil, fmt.Errorf("unable to set IPv6 (%s) on interface: %v: %s", ipNet6, err, strings.TrimSpace(string(out)))
 		}
+		// Add the IPv6 subnet route so the kernel knows to forward the entire
+		// awl IPv6 prefix via this TUN interface (mirrors the IPv4 route added
+		// above). Without this, only the link-local address is reachable; all
+		// awl peer IPv6 addresses in the subnet would be unreachable.
+		ipNet6Masked := &net.IPNet{
+			IP:   localIPv6.Mask(ipMaskv6),
+			Mask: ipMaskv6,
+		}
+		if out, err := exec.Command("route", "-q", "-n", "add", "-inet6",
+			ipNet6Masked.String(), "-iface", realIfname).CombinedOutput(); err != nil {
+			return nil, fmt.Errorf("unable to setup IPv6 interface route: %v: %s", err, strings.TrimSpace(string(out)))
+		}
 	}
 
 	success = true

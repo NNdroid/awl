@@ -64,10 +64,8 @@ func newTUN(ifname string, mtu int, localIP net.IP, ipMask net.IPMask, localIPv6
 	if err := setInterfaceMTU(logger, luid, winipcfg.AddressFamily(windows.AF_INET), uint32(mtu)); err != nil {
 		return nil, fmt.Errorf("set IPv4 MTU on tun: %v", err)
 	}
-	// TODO: support ipv6. Forwarding still ignores IPv6 packets (see Device.WritePacket),
-	// but we set the system MTU best-effort so the interface is configured correctly once
-	// IPv6 lands. On hosts with IPv6 disabled on the interface this Set() fails — that's
-	// expected, not fatal.
+	// Set IPv6 MTU best-effort. On hosts with IPv6 disabled on the interface
+	// this Set() fails — expected, not fatal.
 	if err := setInterfaceMTU(logger, luid, winipcfg.AddressFamily(windows.AF_INET6), uint32(mtu)); err != nil {
 		logger.Warnf("set IPv6 MTU on tun (best-effort, ipv6 unused by awl): %v", err)
 	}
@@ -76,9 +74,17 @@ func newTUN(ifname string, mtu int, localIP net.IP, ipMask net.IPMask, localIPv6
 	netipAddr := netip.MustParseAddr(localIP.String())
 	prefix := netip.PrefixFrom(netipAddr, ones)
 
-	err = luid.SetIPAddresses([]netip.Prefix{prefix})
+	prefixes := []netip.Prefix{prefix}
+	if localIPv6 != nil {
+		onesV6, _ := ipMaskv6.Size()
+		netipAddrV6 := netip.MustParseAddr(localIPv6.String())
+		prefixV6 := netip.PrefixFrom(netipAddrV6, onesV6)
+		prefixes = append(prefixes, prefixV6)
+	}
+
+	err = luid.SetIPAddresses(prefixes)
 	if err != nil {
-		return nil, fmt.Errorf("unable to setup interface IP: %v", err)
+		return nil, fmt.Errorf("unable to setup interface IP (v4/v6): %v", err)
 	}
 
 	success = true

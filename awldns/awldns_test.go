@@ -90,31 +90,52 @@ func TestDNSAAAAQueryDoesNotReturnARecord(t *testing.T) {
 	a.Empty(resp.Answer)
 }
 
-func TestDNSAQueryReturnsARecord(t *testing.T) {
-	a := require.New(t)
-	port := FindFreePort()
-	addr := fmt.Sprintf("127.0.0.1:%d", port)
+func TestDNSQueryReturnsARecord(t *testing.T) {
+	tests := []struct {
+		name       string
+		qtype      uint16
+		configIP   string
+		expectedIP string
+	}{
+		{"A Record", dns.TypeA, "127.0.0.66", "127.0.0.66"},
+		{"AAAA Record", dns.TypeAAAA, "fd86::66", "fd86::66"},
+	}
 
-	resolver := NewResolver(addr)
-	defer resolver.Close()
-	// TODO: remove sleep. We need it because NewResolver starts servers in goroutines
-	time.Sleep(50 * time.Millisecond)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			a := require.New(t)
+			port := FindFreePort()
+			addr := fmt.Sprintf("127.0.0.1:%d", port)
 
-	resolver.ReceiveConfiguration("", map[string]string{
-		"admin": "127.0.0.66",
-	})
+			resolver := NewResolver(addr)
+			defer resolver.Close()
+			time.Sleep(50 * time.Millisecond)
 
-	req := new(dns.Msg)
-	req.SetQuestion("admin.awl.", dns.TypeA)
-	resp, _, err := new(dns.Client).Exchange(req, addr)
-	a.NoError(err)
-	a.Equal(dns.RcodeSuccess, resp.Rcode)
-	a.Len(resp.Answer, 1)
+			resolver.ReceiveConfiguration("", map[string]string{
+				"admin": tt.configIP,
+			})
 
-	aRecord, ok := resp.Answer[0].(*dns.A)
-	a.True(ok)
-	a.Equal("admin.awl.", aRecord.Hdr.Name)
-	a.Equal("127.0.0.66", aRecord.A.String())
+			req := new(dns.Msg)
+			req.SetQuestion("admin.awl.", tt.qtype)
+			resp, _, err := new(dns.Client).Exchange(req, addr)
+			a.NoError(err)
+			a.Equal(dns.RcodeSuccess, resp.Rcode)
+			a.Len(resp.Answer, 1)
+
+			switch tt.qtype {
+			case dns.TypeA:
+				aRecord, ok := resp.Answer[0].(*dns.A)
+				a.True(ok)
+				a.Equal("admin.awl.", aRecord.Hdr.Name)
+				a.Equal(tt.expectedIP, aRecord.A.String())
+			case dns.TypeAAAA:
+				aaaaRecord, ok := resp.Answer[0].(*dns.AAAA)
+				a.True(ok)
+				a.Equal("admin.awl.", aaaaRecord.Hdr.Name)
+				a.Equal(tt.expectedIP, aaaaRecord.AAAA.String())
+			}
+		})
+	}
 }
 
 func TestDNSUnknownAddressReturnsNameError(t *testing.T) {

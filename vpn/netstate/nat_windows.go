@@ -68,6 +68,10 @@ type natState struct {
 	// (Windows reuses interface indexes after adapter removal), and updated
 	// by resyncServerForwarding when the best default route moves.
 	uplinkLUID winipcfg.LUID
+
+	// IPv6 forwarding state (parallel to IPv4).
+	forwarding6Enabled []winipcfg.LUID
+	uplink6LUID        winipcfg.LUID
 }
 
 // setupNAT configures the Windows exit node: a WFP forward-layer filter that
@@ -112,7 +116,16 @@ func (m *Manager) setupNAT(awlSubnet, awlSubnet6, tunIfName string) (*natState, 
 	state := &natState{tunLUID: tunLUID}
 
 	// 1. WFP forward-layer BLOCK — the safety fence goes up first.
-	if err := setupWFP(state, tunIfIndex, awlPrefix); err != nil {
+	awlPrefixes := []netip.Prefix{awlPrefix}
+	if awlSubnet6 != "" {
+		awlPrefix6, err := netip.ParsePrefix(awlSubnet6)
+		if err != nil {
+			logger.Warnf("parse awl IPv6 subnet %q (IPv6 WFP filter skipped): %v", awlSubnet6, err)
+		} else {
+			awlPrefixes = append(awlPrefixes, awlPrefix6)
+		}
+	}
+	if err := setupWFP(state, tunIfIndex, awlPrefixes); err != nil {
 		_ = m.teardownNAT(state)
 		return nil, fmt.Errorf("setup WFP filter: %w", err)
 	}
@@ -155,7 +168,38 @@ func (m *Manager) setupNAT(awlSubnet, awlSubnet6, tunIfName string) (*natState, 
 	}
 	state.natCreated = true
 
+	// 4. Per-interface IPv6 forwarding — best-effort, degrades gracefully.
+	// IPv6 forwarding on TUN + uplink enables the userspace NAT66 engine
+	// (service/nat66_windows.go) to work. Without it, the kernel won't
+	// deliver forwarded IPv6 return packets to TUN.
+	if awlSubnet6 != "" {
+		setupIPv6Forwarding(state, tunLUID)
+	}
+
 	return state, nil
+}
+
+func setupIPv6Forwarding(state *natState, tunLUID winipcfg.LUID) {
+	v6Targets := []winipcfg.LUID{tunLUID}
+	route6, ok6, err := bestUplinkDefault(windows.AF_INET6, tunLUID)
+	if err != nil {
+		logger.Warnf("detect IPv6 uplink for forwarding: %v (IPv6 gateway forwarding may not work)", err)
+	} else if ok6 {
+		state.uplink6LUID = winipcfg.LUID(route6.IfLUID)
+		v6Targets = append(v6Targets, state.uplink6LUID)
+	} else {
+		logger.Warnf("no IPv6 uplink right now: IPv6 gateway forwarding will start when network appears")
+	}
+	for _, luid := range v6Targets {
+		enabledByUs, err := enableIPv6Forwarding(luid)
+		if err != nil {
+			logger.Warnf("enable IPv6 forwarding on interface %d (best-effort): %v", luid, err)
+			continue
+		}
+		if enabledByUs {
+			state.forwarding6Enabled = append(state.forwarding6Enabled, luid)
+		}
+	}
 }
 
 // teardownNAT reverses setupNAT in reverse order: WinNAT first (internet
@@ -182,6 +226,13 @@ func (m *Manager) teardownNAT(state *natState) error {
 	}
 	state.forwardingEnabled = nil
 
+	for _, luid := range state.forwarding6Enabled {
+		if err := disableIPv6Forwarding(luid); err != nil {
+			errs = append(errs, fmt.Errorf("restore IPv6 forwarding on interface %d: %w", luid, err))
+		}
+	}
+	state.forwarding6Enabled = nil
+
 	if state.wfpSession != nil {
 		if err := state.wfpSession.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("close WFP session: %w", err))
@@ -207,12 +258,22 @@ func (m *Manager) resyncServerForwarding() {
 	if state == nil {
 		return
 	}
+
+	// IPv4 re-sync (existing behavior).
 	route, ok, err := bestUplinkDefault(windows.AF_INET, state.tunLUID)
 	if err != nil {
-		logger.Errorf("gateway server forwarding re-sync: detect uplink: %v", err)
-		return
+		logger.Errorf("gateway server forwarding re-sync: detect IPv4 uplink: %v", err)
+	} else {
+		resyncForwarding(state, route, ok, enableIPv4Forwarding)
 	}
-	resyncForwarding(state, route, ok, enableIPv4Forwarding)
+
+	// IPv6 re-sync.
+	route6, ok6, err := bestUplinkDefault(windows.AF_INET6, state.tunLUID)
+	if err != nil {
+		logger.Errorf("gateway server forwarding re-sync: detect IPv6 uplink: %v", err)
+	} else {
+		resyncForwarding6(state, route6, ok6, enableIPv6Forwarding)
+	}
 }
 
 // resyncForwarding is the decision half of resyncServerForwarding, split from
@@ -254,6 +315,31 @@ func resyncForwarding(state *natState, route uplinkRoute, ok bool, enable func(w
 	logger.Infof("gateway server: uplink changed, IPv4 forwarding ensured on new uplink (ifIndex %d)", route.IfIndex)
 }
 
+// resyncForwarding6 mirrors resyncForwarding for IPv6 forwarding. Same
+// semantics: no uplink → keep as-is, same uplink → no-op, new uplink →
+// enable and track.
+func resyncForwarding6(state *natState, route uplinkRoute, ok bool, enable func(winipcfg.LUID) (bool, error)) {
+	if !ok {
+		return
+	}
+	newLUID := winipcfg.LUID(route.IfLUID)
+	if newLUID == state.uplink6LUID {
+		return
+	}
+
+	enabledByUs, err := enable(newLUID)
+	if err != nil {
+		logger.Errorf("gateway server forwarding re-sync: enable IPv6 forwarding on new uplink (ifIndex %d): %v",
+			route.IfIndex, err)
+		return
+	}
+	if enabledByUs && !slices.Contains(state.forwarding6Enabled, newLUID) {
+		state.forwarding6Enabled = append(state.forwarding6Enabled, newLUID)
+	}
+	state.uplink6LUID = newLUID
+	logger.Infof("gateway server: uplink changed, IPv6 forwarding ensured on new uplink (ifIndex %d)", route.IfIndex)
+}
+
 // setupWFP opens a dynamic WFP session and installs one BLOCK filter on the
 // IPv4 forward layer:
 //
@@ -271,8 +357,7 @@ func resyncForwarding(state *natState, route uplinkRoute, ok bool, enable func(w
 // awlSubnet) enters through the uplink, not the TUN, and matches neither of
 // the first two conditions.
 //
-// No IPv6 filter: the client does not tunnel IPv6 (writeInboundBatch drops
-// IsIPv6), so IPv6 transit from awl clients does not exist.
+// IPv6 filter installed alongside IPv4 when an IPv6 awl subnet is configured.
 //
 // Known WFP limitation (accepted): a BLOCK from our sublayer can only be
 // overridden by a hard permit (FWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT) from a
@@ -282,7 +367,7 @@ func resyncForwarding(state *natState, route uplinkRoute, ok bool, enable func(w
 // The session is Dynamic: everything installed here is removed by the kernel
 // when the session closes or the process dies, so there is no stale-WFP
 // recovery path.
-func setupWFP(state *natState, tunIfIndex uint32, awlPrefix netip.Prefix) error {
+func setupWFP(state *natState, tunIfIndex uint32, awlPrefixes []netip.Prefix) error {
 	session, sublayerID, err := openDynamicWFPSession(
 		"Anywherelan VPN gateway",
 		"Blocks forwarded traffic from awl devices to the exit node's private networks",
@@ -297,33 +382,43 @@ func setupWFP(state *natState, tunIfIndex uint32, awlPrefix netip.Prefix) error 
 	// outlive its guarantees until process exit.
 	state.wfpSession = session
 
-	ruleID, err := newWFPGUID()
-	if err != nil {
-		return err
-	}
-	conditions := []*wf.Match{
-		{Field: wf.FieldSourceInterfaceIndex, Op: wf.MatchTypeEqual, Value: tunIfIndex},
-		{Field: wf.FieldIPSourceAddress, Op: wf.MatchTypeEqual, Value: awlPrefix},
-	}
-	for _, p := range privateSubnetPrefixes() {
-		conditions = append(conditions, &wf.Match{
-			Field: wf.FieldIPDestinationAddress, Op: wf.MatchTypeEqual, Value: p,
+	for _, awlPrefix := range awlPrefixes {
+		var layer wf.LayerID
+		if awlPrefix.Addr().Is4() {
+			layer = wf.LayerIPForwardV4
+		} else {
+			layer = wf.LayerIPForwardV6
+		}
+
+		ruleID, err := newWFPGUID()
+		if err != nil {
+			return err
+		}
+		conditions := []*wf.Match{
+			{Field: wf.FieldSourceInterfaceIndex, Op: wf.MatchTypeEqual, Value: tunIfIndex},
+			{Field: wf.FieldIPSourceAddress, Op: wf.MatchTypeEqual, Value: awlPrefix},
+		}
+		for _, p := range AllPrivateSubnetPrefixes() {
+			// Only add private-subnet conditions for the matching address family.
+			if awlPrefix.Addr().Is4() == p.Addr().Is4() {
+				conditions = append(conditions, &wf.Match{
+					Field: wf.FieldIPDestinationAddress, Op: wf.MatchTypeEqual, Value: p,
+				})
+			}
+		}
+
+		err = session.AddRule(&wf.Rule{
+			ID:         wf.RuleID(ruleID),
+			Name:       wfpRuleName,
+			Layer:      layer,
+			Sublayer:   sublayerID,
+			Weight:     1000,
+			Conditions: conditions,
+			Action:     wf.ActionBlock,
 		})
-	}
-	// The filter weight arbitrates only among filters INSIDE our own
-	// sublayer, and we install exactly one — any non-zero value behaves
-	// identically. 1000 just leaves room on both sides for future rules.
-	err = session.AddRule(&wf.Rule{
-		ID:         wf.RuleID(ruleID),
-		Name:       wfpRuleName,
-		Layer:      wf.LayerIPForwardV4,
-		Sublayer:   sublayerID,
-		Weight:     1000,
-		Conditions: conditions,
-		Action:     wf.ActionBlock,
-	})
-	if err != nil {
-		return fmt.Errorf("add WFP block rule: %w", err)
+		if err != nil {
+			return fmt.Errorf("add WFP block rule (%s): %w", layer, err)
+		}
 	}
 
 	return nil
@@ -403,6 +498,39 @@ func disableIPv4Forwarding(luid winipcfg.LUID) error {
 	ipIface.ForwardingEnabled = false
 	if err := ipIface.Set(); err != nil {
 		return fmt.Errorf("set forwarding: %w", err)
+	}
+	return nil
+}
+
+// enableIPv6Forwarding turns IPv6 forwarding on for one interface via
+// SetIpInterfaceEntry. Returns enabledByUs=true iff it was off and we flipped
+// it — mirroring enableIPv4Forwarding.
+func enableIPv6Forwarding(luid winipcfg.LUID) (bool, error) {
+	ipIface, err := luid.IPInterface(windows.AF_INET6)
+	if err != nil {
+		return false, fmt.Errorf("get IPv6 IP interface: %w", err)
+	}
+	if ipIface.ForwardingEnabled {
+		return false, nil
+	}
+	ipIface.ForwardingEnabled = true
+	if err := ipIface.Set(); err != nil {
+		return false, fmt.Errorf("set IPv6 forwarding: %w", err)
+	}
+	return true, nil
+}
+
+func disableIPv6Forwarding(luid winipcfg.LUID) error {
+	ipIface, err := luid.IPInterface(windows.AF_INET6)
+	if err != nil {
+		return fmt.Errorf("get IPv6 IP interface: %w", err)
+	}
+	if !ipIface.ForwardingEnabled {
+		return nil
+	}
+	ipIface.ForwardingEnabled = false
+	if err := ipIface.Set(); err != nil {
+		return fmt.Errorf("set IPv6 forwarding: %w", err)
 	}
 	return nil
 }
