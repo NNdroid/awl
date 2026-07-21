@@ -129,6 +129,7 @@ jobs:
           ./librespeed-cli --local-json config_librespeed.json --server 2 --json --share --telemetry-level disabled | python3 -m json.tool
 
           ping 10.66.0.2 -w 20 -c 10
+          ping6 fd00:66:0::2 -w 20 -c 10 || true
           # TODO: remove this temporal hack for linux
           ping awl-tester.awl -w 20 -c 10 || true
 

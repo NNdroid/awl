@@ -593,6 +593,50 @@ func testPacketWithDest(length int, destIP string) []byte {
 	return testPacketWithSrcDest(length, "10.66.0.1", destIP)
 }
 
+func testPacketWithSrcDestV6(length int, srcIP, destIP string) []byte {
+	data, err := hex.DecodeString("6000000000141140fd000000000000000000000000000001fd00000000000000000000000000000204d2162e0014000068656c6c6f20776f726c6421")
+	if err != nil {
+		panic(err)
+	}
+
+	packet := data
+	if length > len(data) {
+		packet = make([]byte, length)
+		copy(packet, data)
+		_, err = rand.Read(packet[len(data):])
+		if err != nil {
+			panic(err)
+		}
+	}
+
+	vpnPacket := vpn.Packet{}
+	_, err = vpnPacket.ReadFrom(bytes.NewReader(packet))
+	if err != nil {
+		panic(err)
+	}
+	vpnPacket.Parse()
+
+	srcIPParsed := net.ParseIP(srcIP).To16()
+	if srcIPParsed == nil {
+		panic(fmt.Sprintf("invalid source IPv6: %s", srcIP))
+	}
+	copy(vpnPacket.Src, srcIPParsed)
+
+	destIPParsed := net.ParseIP(destIP).To16()
+	if destIPParsed == nil {
+		panic(fmt.Sprintf("invalid destination IPv6: %s", destIP))
+	}
+	copy(vpnPacket.Dst, destIPParsed)
+
+	vpnPacket.RecalculateChecksum()
+
+	return vpnPacket.Packet
+}
+
+func testPacketWithDestV6(length int, destIP string) []byte {
+	return testPacketWithSrcDestV6(length, "fd00:66:0::1", destIP)
+}
+
 // parsePacketIPs extracts src and dst IPs from a raw IPv4 packet.
 func parsePacketIPs(rawPacket []byte) (src, dst net.IP) {
 	pkt := vpn.Packet{}
