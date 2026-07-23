@@ -174,7 +174,10 @@ func setDefaults(conf *Config, bus awlevent.Bus) {
 	if conf.VPNConfig.IPNet == "" {
 		conf.VPNConfig.IPNet = DefaultVPNNetworkSubnet
 	}
-	if conf.VPNConfig.IPNetV6 == "" {
+	
+	// IPv6 support is a significant change, so it's opt-in for existing users 
+	// to ensure a safe upgrade path. We only set the default for new configs.
+	if isEmptyConfig && conf.VPNConfig.IPNetV6 == "" {
 		conf.VPNConfig.IPNetV6 = DefaultVPNNetworkSubnet6
 	}
 	if ip, _ := conf.VPNLocalIPMask(); ip == nil {

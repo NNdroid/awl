@@ -536,14 +536,13 @@ func (t *testTun) Close() error {
 	return nil
 }
 
-var testPortCounter int32 = 20000
-
 func pickFreeAddr(t testing.TB) string {
-	port := atomic.AddInt32(&testPortCounter, 1)
-	if port < testPortCounter {
-		t.Fatalf("port counter overflow: %d", port)
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
 	}
-	return fmt.Sprintf("127.0.0.1:%d", port)
+	defer l.Close()
+	return l.Addr().String()
 }
 
 func testPacket(length int) []byte {

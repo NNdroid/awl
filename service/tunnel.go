@@ -726,8 +726,11 @@ func (t *Tunnel) writeInboundBatch(packets []*vpn.Packet, bufs [][]byte, senderI
 	isOurGateway := t.vpnGatewayClientEnabled && vp.peerID == t.vpnGatewayPeerID
 	t.peersLock.RUnlock()
 
-	localIPv4, _ := t.conf.VPNLocalIPMask()
-	localIPv6, _ := t.conf.VPNLocalIPMaskV6()
+	localIPv4 := t.awlSubnet.IP
+	var localIPv6 net.IP
+	if t.awlSubnet6 != nil {
+		localIPv6 = t.awlSubnet6.IP
+	}
 
 	allowGateway := vp.weAllowUsingAsExitNode.Load()
 
@@ -789,6 +792,12 @@ func (t *Tunnel) writeInboundBatch(packets []*vpn.Packet, bufs [][]byte, senderI
 }
 
 // isNonRoutableIP returns true for IPs that should not be forwarded through the gateway.
+//
+// TODO(gateway): add client-side drop of
+// private destinations (10/8, 172.16/12, 192.168/16, CGNAT, link-local)
+// before sending to the gateway: fast local refusal instead of a silent drop
+// at the exit node's filter. Not a replacement for the server-side filtering
+// (iptables on Linux, WFP on Windows) — the server cannot trust clients.
 func isNonRoutableIP(ip net.IP) bool {
 	return ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast()
 }
