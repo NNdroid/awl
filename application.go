@@ -107,7 +107,7 @@ type Application struct {
 type NetManager interface {
 	Start(ctx context.Context) error
 	ControlFunc() func(network, address string, c syscall.RawConn) error
-	EnableClientRoutes(tunIfName string) error
+	EnableClientRoutes(tunIfName string, bypassCIDRs []string) error
 	DisableClientRoutes() error
 	ClientRoutesActive() bool
 	EnableServerNAT(awlSubnet, awlSubnet6, tunIfName string) error
