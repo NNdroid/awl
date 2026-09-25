@@ -6,8 +6,8 @@
 //     SO_MARK + ip-rule policy routing. Android: VpnService.protect()
 //     callback supplied by the host app. Windows: IP_UNICAST_IF binding to
 //     the physical uplink NIC. Other platforms: no-op.
-//   - Client-side gateway routes: the TUN default route plus the IPv6
-//     fail-closed fence.
+//   - Client-side gateway routes: dual-stack full-tunnel capture plus
+//     platform-specific split-tunnel bypass handling.
 //   - Server-side exit-node NAT: forwarding, address translation and the
 //     LAN/CGNAT isolation filter.
 //   - Uplink detection (Windows): picking the physical interface carrying
