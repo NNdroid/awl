@@ -48,15 +48,41 @@ peer ID: 12D3KooWJMUjt9b5T1umzgzjLv5yG2ViuuF4qjmN65tsRXZGS1p8
 mesh IP: 10.66.0.2
 ```
 
-The public tester only knows pre-authorized stable CI peers. Therefore public
-mesh, overlay speed-test, and external full-tunnel checks require the relevant
-platform `CONFIG_AWL_*` secret.
+The public tester auto-accepts ordinary peer authentication, so the dedicated
+throughput workflow can use an ephemeral CI identity to measure AWL overlay
+performance without repository secrets. It does **not** grant arbitrary peers
+exit-node permission.
 
-To enable the public e2e for a platform, provide its stable `CONFIG_AWL_*`
-secret and ensure that peer has been added on `awl-tester`. To enable the
-full-tunnel subsection as well, grant that peer `Allow as exit node` on
-`awl-tester`.
+The optional external e2e inside `test.yml` still uses stable
+`CONFIG_AWL_*` identities when you want to exercise the pre-authorized public
+tester path.
 
-This optional external test is supplemental. Deterministic gateway coverage is
-provided by the repository's Linux NAT66 and Windows Wintun/WFP host-network
-tests and the family-neutral gateway data-plane tests.
+## Throughput benchmarks
+
+Two workflows cover performance:
+
+- `.github/workflows/throughput.yml` runs on Linux, Windows and macOS and takes
+  three samples per path by default. It reports the median download/upload
+  throughput, ping and jitter for:
+  - direct public LibreSpeed traffic;
+  - AWL overlay IPv4 to `10.66.0.2:8989`;
+  - AWL overlay IPv6 to
+    `[fd00:66:0:98ef:7a00:2b43:35a5:8524]:8989`.
+- `.github/workflows/full-tunnel-throughput.yml` is fully self-contained. A
+  temporary Linux runner starts an AWL gateway, creates a short-lived invite
+  with `Allow as exit node`, and Linux/Windows clients benchmark direct
+  traffic against system-wide full-tunnel traffic through that exit. No
+  repository secrets are required.
+
+macOS is intentionally absent from the full-tunnel matrix because AWL gateway
+client mode is not supported on Darwin.
+
+The public GitHub runners are not guaranteed to have public IPv6 egress, so
+`throughput.yml` measures IPv6 on the AWL overlay itself. IPv6 full-tunnel
+correctness/NAT66 is covered deterministically by the Windows Wintun/WFP,
+gateway data-plane and Linux NAT66 host-network tests; the benchmark does not
+claim public-internet NAT66 throughput unless the runner actually has public
+IPv6.
+
+All throughput workflows upload their JSON results and AWL logs as Actions
+artifacts, and write the median result table to the GitHub Actions job summary.
