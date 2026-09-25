@@ -214,7 +214,6 @@ func (m *Manager) EnableClientRoutes(tunIfName string, bypassCIDRs []string) err
 	return nil
 }
 
-
 func (m *Manager) resyncClientBypassRoutes() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
