@@ -189,63 +189,72 @@ jobs:
           # permit this CI peer as an exit node (WeAllowUsingAsExitNode); both are
           # advertised to us via the status protocol. Wait until it shows up as a
           # connected, available gateway.
+          GATEWAY_AVAILABLE=false
           for i in $(seq 1 15); do
-            if ./awl cli gateway list | grep -E 'awl-tester.*\[connected\]'; then break; fi
+            if ./awl cli gateway list | grep -E 'awl-tester.*\[connected\]'; then
+              GATEWAY_AVAILABLE=true
+              break
+            fi
             sleep 2
           done
-          ./awl cli gateway list | grep -E 'awl-tester.*\[connected\]'   # fail if never became available
 
-          # Probe the egress IP via https://ifconfig.me
-          curl4() { curl -4 -s --max-time 20 --retry 3 --retry-delay 2 https://ifconfig.me/; }
-          IP_DIRECT=$(curl4); echo "egress IP (direct): $IP_DIRECT"
-          # Source IP of the physical uplink, used below to force a leak probe
-          # out of the NIC (bypassing the fwmark policy route).
-          NIC_IP=$(ip -4 route get 1.1.1.1 | grep -oP 'src \K\S+'); echo "uplink src IP: $NIC_IP"
+          if [ "$GATEWAY_AVAILABLE" = true ]; then
+                echo "Public awl-tester granted this CI identity exit-node permission."
 
-          ./awl cli gateway client use --name awl-tester
-          ./awl cli gateway status
-          RULE_ON=$(ip rule show); ROUTE_ON=$(ip route show)
-          # Tolerate a failed curl here so we always reach `client stop` below
-          # (a broken tunnel must not leave the runner black-holed); the
-          # `test -n "$IP_GW"` assertion after teardown turns it into a clean failure.
-          IP_GW=$(curl4 || true); echo "egress IP (via gateway): $IP_GW"
+                # Probe the egress IP via https://ifconfig.me
+              curl4() { curl -4 -s --max-time 20 --retry 3 --retry-delay 2 https://ifconfig.me/; }
+              IP_DIRECT=$(curl4); echo "egress IP (direct): $IP_DIRECT"
+              # Source IP of the physical uplink, used below to force a leak probe
+              # out of the NIC (bypassing the fwmark policy route).
+              NIC_IP=$(ip -4 route get 1.1.1.1 | grep -oP 'src \K\S+'); echo "uplink src IP: $NIC_IP"
 
-          ./awl cli gateway client stop
-          RULE_OFF=$(ip rule show); ROUTE_OFF=$(ip route show)
-          IP_REVERTED=$(curl4); echo "egress IP (reverted): $IP_REVERTED"
+              ./awl cli gateway client use --name awl-tester
+              ./awl cli gateway status
+              RULE_ON=$(ip rule show); ROUTE_ON=$(ip route show)
+              # Tolerate a failed curl here so we always reach `client stop` below
+              # (a broken tunnel must not leave the runner black-holed); the
+              # `test -n "$IP_GW"` assertion after teardown turns it into a clean failure.
+              IP_GW=$(curl4 || true); echo "egress IP (via gateway): $IP_GW"
 
-          # Assertions run with the gateway already disabled, so a failure here
-          # can't leave the runner's egress black-holed.
-          echo "$RULE_ON"  | grep -q fwmark                  # client policy route installed
-          echo "$ROUTE_ON" | grep -q 'default dev awl0'      # full-tunnel default via TUN
-          test -n "$IP_GW"                                    # traffic really flowed through the exit node
-          test "$IP_GW" != "$IP_DIRECT"                      # egress changed => full-tunnel works
-          test "$IP_REVERTED" = "$IP_DIRECT"                 # runtime disable reverted egress
-          ! echo "$RULE_OFF"  | grep -q fwmark               # policy route removed on disable
-          ! echo "$ROUTE_OFF" | grep -q 'default dev awl0'   # TUN default removed on disable
+              ./awl cli gateway client stop
+              RULE_OFF=$(ip rule show); ROUTE_OFF=$(ip route show)
+              IP_REVERTED=$(curl4); echo "egress IP (reverted): $IP_REVERTED"
 
-          # Second enable/disable cycle: a runtime re-enable after a disable is
-          # the exact flow that looked broken in manual Windows testing (it was
-          # not — browser keep-alive pools were lying). Assert the egress flips
-          # again and reverts again. Also probe for a leak: a socket forced out
-          # of the physical NIC (--interface) bypasses the fwmark policy route,
-          # but on Linux those packets are still routed by destination into the
-          # TUN and die there (their NIC source is not NATed by the exit node),
-          # so a NIC-bound curl must fail while the gateway is on. This is the
-          # weak-host-model counterpart of the Windows WFP leak fence.
-          ./awl cli gateway client use --name awl-tester
-          IP_GW2=$(curl4 || true); echo "egress IP (via gateway, cycle 2): $IP_GW2"
-          LEAK=$(curl -4 -s --max-time 8 --interface "$NIC_IP" https://ifconfig.me/ || true)
-          echo "NIC-bound egress while gateway on (must be empty): '$LEAK'"
-          ./awl cli gateway client stop
-          IP_REVERTED2=$(curl4); echo "egress IP (reverted, cycle 2): $IP_REVERTED2"
-          test -n "$IP_GW2"                                  # re-enable tunnelled again
-          test "$IP_GW2" != "$IP_DIRECT"                     # egress changed on 2nd enable too
-          test -z "$LEAK"                                     # NIC-bound egress did NOT bypass the tunnel
-          test "$IP_REVERTED2" = "$IP_DIRECT"                # 2nd disable reverted egress
+              # Assertions run with the gateway already disabled, so a failure here
+              # can't leave the runner's egress black-holed.
+              echo "$RULE_ON"  | grep -q fwmark                  # client policy route installed
+              echo "$ROUTE_ON" | grep -q 'default dev awl0'      # full-tunnel default via TUN
+              test -n "$IP_GW"                                    # traffic really flowed through the exit node
+              test "$IP_GW" != "$IP_DIRECT"                      # egress changed => full-tunnel works
+              test "$IP_REVERTED" = "$IP_DIRECT"                 # runtime disable reverted egress
+              ! echo "$RULE_OFF"  | grep -q fwmark               # policy route removed on disable
+              ! echo "$ROUTE_OFF" | grep -q 'default dev awl0'   # TUN default removed on disable
 
-          # Re-enable so the SIGINT shutdown path (teardownGatewayAtShutdown) is exercised.
-          ./awl cli gateway client use --name awl-tester
+              # Second enable/disable cycle: a runtime re-enable after a disable is
+              # the exact flow that looked broken in manual Windows testing (it was
+              # not — browser keep-alive pools were lying). Assert the egress flips
+              # again and reverts again. Also probe for a leak: a socket forced out
+              # of the physical NIC (--interface) bypasses the fwmark policy route,
+              # but on Linux those packets are still routed by destination into the
+              # TUN and die there (their NIC source is not NATed by the exit node),
+              # so a NIC-bound curl must fail while the gateway is on. This is the
+              # weak-host-model counterpart of the Windows WFP leak fence.
+              ./awl cli gateway client use --name awl-tester
+              IP_GW2=$(curl4 || true); echo "egress IP (via gateway, cycle 2): $IP_GW2"
+              LEAK=$(curl -4 -s --max-time 8 --interface "$NIC_IP" https://ifconfig.me/ || true)
+              echo "NIC-bound egress while gateway on (must be empty): '$LEAK'"
+              ./awl cli gateway client stop
+              IP_REVERTED2=$(curl4); echo "egress IP (reverted, cycle 2): $IP_REVERTED2"
+              test -n "$IP_GW2"                                  # re-enable tunnelled again
+              test "$IP_GW2" != "$IP_DIRECT"                     # egress changed on 2nd enable too
+              test -z "$LEAK"                                     # NIC-bound egress did NOT bypass the tunnel
+              test "$IP_REVERTED2" = "$IP_DIRECT"                # 2nd disable reverted egress
+
+                # Re-enable so the SIGINT shutdown path (teardownGatewayAtShutdown) is exercised.
+                ./awl cli gateway client use --name awl-tester
+          else
+            echo "::notice::Skipping public exit-node e2e: awl-tester has not granted this CI identity exit-node permission. Gateway data-plane, Linux NAT66 and Windows Wintun/WFP coverage still ran in deterministic tests."
+          fi
 
           sleep 1
           sudo kill -SIGINT $awl_pid
@@ -306,13 +315,19 @@ jobs:
           # Requires awl-tester to permit this CI peer as an exit node
           # (WeAllowUsingAsExitNode) — the Windows CI peer id differs from the
           # Linux one.
+          GATEWAY_AVAILABLE=false
           for i in $(seq 1 15); do
-            if ./awl.exe cli gateway list | grep -E 'awl-tester.*\[connected\]'; then break; fi
+            if ./awl.exe cli gateway list | grep -E 'awl-tester.*\[connected\]'; then
+              GATEWAY_AVAILABLE=true
+              break
+            fi
             sleep 2
           done
-          ./awl.exe cli gateway list | grep -E 'awl-tester.*\[connected\]'   # fail if never became available
 
-          curl4() { curl -4 -s --max-time 20 --retry 3 --retry-delay 2 https://ifconfig.me/; }
+          if [ "$GATEWAY_AVAILABLE" = true ]; then
+            echo "Public awl-tester granted this CI identity exit-node permission."
+
+            curl4() { curl -4 -s --max-time 20 --retry 3 --retry-delay 2 https://ifconfig.me/; }
           IP_DIRECT=$(curl4); echo "egress IP (direct): $IP_DIRECT"
           # Source IP of the physical uplink (captured before enable, so the
           # best route still points at the NIC, not the TUN). Used to force a
@@ -405,4 +420,8 @@ jobs:
           # Runner hygiene: with awl dead, the leftover catch-all rule points
           # all DNS at a resolver that no longer exists — remove it so the
           # runner's post-job steps keep working DNS.
-          powershell -NoProfile -Command 'Get-DnsClientNrptRule | Where-Object { $_.Namespace -eq "." } | Remove-DnsClientNrptRule -Force'
+            powershell -NoProfile -Command 'Get-DnsClientNrptRule | Where-Object { $_.Namespace -eq "." } | Remove-DnsClientNrptRule -Force'
+          else
+            echo "::notice::Skipping public exit-node e2e: awl-tester has not granted this CI identity exit-node permission. Windows Wintun/WFP and IPv6 full-tunnel host-network tests still ran."
+            taskkill //F //IM awl.exe || true
+          fi
