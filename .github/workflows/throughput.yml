@@ -113,7 +113,7 @@ jobs:
 
           CONNECTED=0
           for _ in $(seq 1 60); do
-            if "$AWL" cli peers status 2>/dev/null | grep -E 'awl-tester.*\[connected\]' >/dev/null; then
+            if "$AWL" cli peers status 2>/dev/null | grep -E 'awl-tester.*(online|\[connected\])' >/dev/null; then
               CONNECTED=1
               break
             fi
