@@ -48,7 +48,7 @@ func TestPacket_RecalculateChecksum_IPv6DestinationOptions(t *testing.T) {
 	binary.BigEndian.PutUint16(udp[0:], 1234)
 	binary.BigEndian.PutUint16(udp[2:], 443)
 	binary.BigEndian.PutUint16(udp[4:], uint16(len(udp)))
-	copy(udp[8:], []byte("hello-ipv6!!"))
+	copy(udp[8:], "hello-ipv6!!")
 
 	raw := make([]byte, 40+8+len(udp))
 	raw[0] = 0x60
@@ -93,7 +93,7 @@ func TestPacket_RecalculateChecksum_IPv6FirstFragmentUsesIncrementalAdjustment(t
 	binary.BigEndian.PutUint16(fullUDP[0:], 1234)
 	binary.BigEndian.PutUint16(fullUDP[2:], 443)
 	binary.BigEndian.PutUint16(fullUDP[4:], uint16(len(fullUDP)))
-	copy(fullUDP[8:], []byte("fragmented-ipv6-payload!"))
+	copy(fullUDP[8:], "fragmented-ipv6-payload!")
 	oldChecksum := checksumIPv6TCPUDP(fullUDP, IPProtocolUDP, oldSrc, dst)
 	if oldChecksum == 0 {
 		oldChecksum = 0xffff
