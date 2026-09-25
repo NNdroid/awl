@@ -61,7 +61,8 @@ jobs:
           ./awl cli gateway server enable
           ./awl cli gateway status
 
-          INVITE=$(./awl cli peers invite create --uses 3 --expires 20m --allow-exit-node --label throughput-ci --no-qr | head -n 1)
+          INVITE_OUTPUT=$(./awl cli peers invite create --uses 3 --expires 20m --allow-exit-node --label throughput-ci --no-qr)
+          INVITE=$(printf '%s\n' "$INVITE_OUTPUT" | sed -n '1p')
           test -n "$INVITE"
           case "$INVITE" in
             awl://*) ;;
