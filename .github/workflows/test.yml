@@ -256,7 +256,11 @@ jobs:
           ./librespeed-cli.exe --local-json config_librespeed.json --server 2 --json --share --telemetry-level disabled | python3 -m json.tool
 
           ping -w 20000 -n 10 10.66.0.2
-          echo "IPv6 VPN gateway is currently supported on Linux only, skipping IPv6 ping test on Windows."
+          # Windows dual-stack gateway support is verified deterministically by
+          # the Windows unit tests plus TestGatewayHostNetClientRoutesLifecycle /
+          # TestGatewayHostNetClientIPv6BypassLifecycle. Do not make this e2e
+          # job depend on the GitHub-hosted runner having native public IPv6.
+          echo "Windows IPv6 gateway coverage: unit + Wintun/WFP host-network tests"
 
           # ---- VPN gateway server (exit-node) mode: runtime enable/disable round-trips OS state ----
           # Diagnostic first: what the runner already holds in WinNAT (a
