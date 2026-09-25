@@ -1,0 +1,327 @@
+name: Throughput Benchmark
+
+# Direct and AWL overlay (IPv4 + IPv6) benchmark.
+# Full-tunnel throughput is covered by full-tunnel-throughput.yml.
+
+on:
+  push:
+    branches:
+      - ci/throughput-benchmark
+    paths:
+      - ".github/workflows/throughput.yml"
+      - ".github/ci/**"
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: "Number of samples per path"
+        required: false
+        default: "3"
+      full_tunnel:
+        description: "Attempt full-tunnel benchmark when exit-node permission is available"
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: throughput-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  benchmark:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      SAMPLE_RUNS: ${{ inputs.runs || '3' }}
+      WANT_FULL_TUNNEL: ${{ (github.event_name == 'workflow_dispatch' && inputs.full_tunnel == false) && '0' || '1' }}
+      CONFIG_AWL_LINUX: ${{ secrets.CONFIG_AWL_LINUX }}
+      CONFIG_AWL_MACOS: ${{ secrets.CONFIG_AWL_MACOS }}
+      CONFIG_AWL_WINDOWS: ${{ secrets.CONFIG_AWL_WINDOWS }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 1.26.x
+          cache: true
+
+      - name: Build awl
+        run: |
+          mkdir -p static
+          touch static/index.html
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            ./build.sh deps
+            go build -o awl.exe ./cmd/awl
+          else
+            go build -o awl ./cmd/awl
+          fi
+
+      - name: Install LibreSpeed CLI
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            curl -fsSL https://github.com/librespeed/speedtest-cli/releases/download/v1.0.10/librespeed-cli_1.0.10_linux_amd64.tar.gz | tar -xzf -
+          elif [ "$RUNNER_OS" = "macOS" ]; then
+            curl -fsSL https://github.com/librespeed/speedtest-cli/releases/download/v1.0.10/librespeed-cli_1.0.10_darwin_arm64.tar.gz | tar -xzf -
+          else
+            curl -fsSL https://github.com/librespeed/speedtest-cli/releases/download/v1.0.10/librespeed-cli_1.0.10_windows_amd64.zip -o download.zip
+            unzip -qo download.zip
+          fi
+          cp .github/ci/librespeed.json config_librespeed.json
+
+      - name: Prepare AWL identity
+        run: |
+          case "$RUNNER_OS" in
+            Linux)   AWL_CONFIG="$CONFIG_AWL_LINUX" ;;
+            macOS)   AWL_CONFIG="$CONFIG_AWL_MACOS" ;;
+            Windows) AWL_CONFIG="$CONFIG_AWL_WINDOWS" ;;
+          esac
+          if [ -n "$AWL_CONFIG" ]; then
+            printf '%s\n' "$AWL_CONFIG" > config_awl.json
+            echo "STABLE_IDENTITY=1" >> "$GITHUB_ENV"
+          else
+            printf '%s\n' '{}' > config_awl.json
+            echo "STABLE_IDENTITY=0" >> "$GITHUB_ENV"
+          fi
+          python3 -m json.tool config_awl.json >/dev/null
+
+      - name: Start AWL and connect tester
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            ./awl.exe > awl.log 2>&1 &
+            echo $! > awl.pid
+            AWL=./awl.exe
+          else
+            sudo ./awl > awl.log 2>&1 &
+            echo $! > awl.pid
+            AWL=./awl
+          fi
+
+          for _ in $(seq 1 60); do
+            if "$AWL" cli me status >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          "$AWL" cli me status
+
+          if ! "$AWL" cli peers status 2>/dev/null | grep -q awl-tester; then
+            "$AWL" cli peers add --pid 12D3KooWJMUjt9b5T1umzgzjLv5yG2ViuuF4qjmN65tsRXZGS1p8 --name awl-tester
+          fi
+
+          CONNECTED=0
+          for _ in $(seq 1 60); do
+            if "$AWL" cli peers status 2>/dev/null | grep -E 'awl-tester.*(online|\[connected\])' >/dev/null; then
+              CONNECTED=1
+              break
+            fi
+            sleep 2
+          done
+          "$AWL" cli peers status || true
+          echo "TESTER_CONNECTED=$CONNECTED" >> "$GITHUB_ENV"
+          if [ "$CONNECTED" != "1" ]; then
+            echo "::warning::awl-tester did not authorize/connect this identity; overlay/full-tunnel measurements will be unavailable."
+          fi
+
+      - name: Run throughput samples
+        run: |
+          python3 - <<'PY'
+          import json, os, subprocess, statistics, time
+
+          runs = max(1, int(os.environ.get("SAMPLE_RUNS", "3")))
+          connected = os.environ.get("TESTER_CONNECTED") == "1"
+          runner = os.environ.get("RUNNER_OS")
+          speed = "./librespeed-cli.exe" if runner == "Windows" else "./librespeed-cli"
+          awl = "./awl.exe" if runner == "Windows" else "./awl"
+
+          def speedtest(server):
+              p = subprocess.run(
+                  [speed, "--local-json", "config_librespeed.json", "--server", str(server),
+                   "--json", "--telemetry-level", "disabled"],
+                  text=True, capture_output=True, timeout=180)
+              if p.returncode:
+                  raise RuntimeError(f"librespeed server {server} failed: {p.stderr}\n{p.stdout}")
+              payload=json.loads(p.stdout)
+              if isinstance(payload, list):
+                  if not payload:
+                      raise RuntimeError("librespeed returned an empty JSON array")
+                  payload=payload[0]
+              return payload
+
+          def samples(server):
+              out=[]
+              for i in range(runs):
+                  r=speedtest(server)
+                  out.append({
+                      "download": float(r["download"]),
+                      "upload": float(r["upload"]),
+                      "ping": float(r["ping"]),
+                      "jitter": float(r["jitter"]),
+                  })
+                  print(f"sample server={server} #{i+1}: {out[-1]}")
+                  time.sleep(1)
+              return out
+
+          def summary(xs):
+              if not xs:
+                  return None
+              def med(k): return round(statistics.median(x[k] for x in xs), 2)
+              return {k:med(k) for k in ("download","upload","ping","jitter")}
+
+          result={"platform":runner,"samples":runs,"tester_connected":connected}
+          result["direct_samples"]=samples(1)
+          result["direct"]=summary(result["direct_samples"])
+
+          def efficiency(value):
+              if not value:
+                  return None
+              return {
+                  "download_pct": round(value["download"]/result["direct"]["download"]*100,2) if result["direct"]["download"] else 0,
+                  "upload_pct": round(value["upload"]/result["direct"]["upload"]*100,2) if result["direct"]["upload"] else 0,
+                  "ping_overhead_ms": round(value["ping"]-result["direct"]["ping"],2),
+              }
+
+          if connected:
+              result["overlay_samples"]=samples(2)
+              result["overlay"]=summary(result["overlay_samples"])
+              result["overlay_efficiency"]=efficiency(result["overlay"])
+
+              # Server 3 is the same awl-tester LibreSpeed service addressed
+              # through its AWL IPv6 address. Keep it non-fatal on platforms
+              # where the IPv6 overlay is unavailable, but preserve the error
+              # in the artifact instead of silently dropping the measurement.
+              try:
+                  result["overlay_ipv6_samples"]=samples(3)
+                  result["overlay_ipv6"]=summary(result["overlay_ipv6_samples"])
+                  result["overlay_ipv6_efficiency"]=efficiency(result["overlay_ipv6"])
+              except Exception as e:
+                  result["overlay_ipv6"]=None
+                  result["overlay_ipv6_efficiency"]=None
+                  result["overlay_ipv6_error"]=str(e)
+                  print(f"IPv6 overlay benchmark unavailable: {e}")
+          else:
+              result["overlay"]=None
+              result["overlay_efficiency"]=None
+              result["overlay_ipv6"]=None
+              result["overlay_ipv6_efficiency"]=None
+
+          with open("throughput.json","w") as f:
+              json.dump(result,f,indent=2)
+
+          print(json.dumps(result,indent=2))
+          PY
+
+      - name: Attempt full-tunnel throughput
+        if: env.TESTER_CONNECTED == '1' && env.WANT_FULL_TUNNEL == '1'
+        run: |
+          AWL=./awl
+          [ "$RUNNER_OS" = "Windows" ] && AWL=./awl.exe
+          AVAILABLE=0
+          for _ in $(seq 1 20); do
+            if "$AWL" cli gateway list | grep -E 'awl-tester.*\[connected\]' >/dev/null; then
+              AVAILABLE=1
+              break
+            fi
+            sleep 2
+          done
+          if [ "$AVAILABLE" != "1" ]; then
+            echo "::notice::Full-tunnel throughput skipped: awl-tester has not granted this CI identity exit-node permission."
+            exit 0
+          fi
+
+          "$AWL" cli gateway client use --name awl-tester
+          trap '"$AWL" cli gateway client stop || true' EXIT
+
+          python3 - <<'PY'
+          import json, os, subprocess, statistics, time
+          runs=max(1,int(os.environ.get("SAMPLE_RUNS","3")))
+          speed="./librespeed-cli.exe" if os.environ.get("RUNNER_OS")=="Windows" else "./librespeed-cli"
+          vals=[]
+          for i in range(runs):
+              p=subprocess.run([speed,"--local-json","config_librespeed.json","--server","1","--json","--telemetry-level","disabled"],
+                               text=True,capture_output=True,timeout=180)
+              if p.returncode:
+                  raise SystemExit(p.stderr or p.stdout)
+              r=json.loads(p.stdout)
+              if isinstance(r, list):
+                  if not r:
+                      raise SystemExit("librespeed returned an empty JSON array")
+                  r=r[0]
+              x={k:float(r[k]) for k in ("download","upload","ping","jitter")}
+              vals.append(x)
+              print(f"full-tunnel sample #{i+1}: {x}")
+              time.sleep(1)
+          med=lambda k: round(statistics.median(v[k] for v in vals),2)
+          full={k:med(k) for k in ("download","upload","ping","jitter")}
+          with open("throughput.json") as f: result=json.load(f)
+          result["full_tunnel_samples"]=vals
+          result["full_tunnel"]=full
+          d=result["direct"]
+          result["full_tunnel_efficiency"]={
+              "download_pct": round(full["download"]/d["download"]*100,2) if d["download"] else 0,
+              "upload_pct": round(full["upload"]/d["upload"]*100,2) if d["upload"] else 0,
+              "ping_overhead_ms": round(full["ping"]-d["ping"],2),
+          }
+          with open("throughput.json","w") as f: json.dump(result,f,indent=2)
+          print(json.dumps(result,indent=2))
+          PY
+
+          "$AWL" cli gateway client stop
+          trap - EXIT
+
+      - name: Publish summary
+        if: always()
+        run: |
+          if [ ! -f throughput.json ]; then
+            echo "No throughput result produced." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          r=json.load(open("throughput.json"))
+          print(f"## {r['platform']} throughput")
+          print("")
+          print(f"- Samples per path: **{r['samples']}**")
+          print(f"- Public awl-tester connected: **{r.get('tester_connected', False)}**")
+          print("")
+          print("| Path | Download Mbps | Upload Mbps | Ping ms | Jitter ms | DL efficiency | UL efficiency |")
+          print("|---|---:|---:|---:|---:|---:|---:|")
+          d=r.get("direct")
+          print(f"| Direct | {d['download']:.2f} | {d['upload']:.2f} | {d['ping']:.2f} | {d['jitter']:.2f} | 100% | 100% |")
+          o=r.get("overlay")
+          oe=r.get("overlay_efficiency")
+          if o:
+              print(f"| AWL overlay IPv4 | {o['download']:.2f} | {o['upload']:.2f} | {o['ping']:.2f} | {o['jitter']:.2f} | {oe['download_pct']:.2f}% | {oe['upload_pct']:.2f}% |")
+          else:
+              print("| AWL overlay IPv4 | n/a | n/a | n/a | n/a | n/a | n/a |")
+          o6=r.get("overlay_ipv6")
+          oe6=r.get("overlay_ipv6_efficiency")
+          if o6:
+              print(f"| AWL overlay IPv6 | {o6['download']:.2f} | {o6['upload']:.2f} | {o6['ping']:.2f} | {o6['jitter']:.2f} | {oe6['download_pct']:.2f}% | {oe6['upload_pct']:.2f}% |")
+          else:
+              print("| AWL overlay IPv6 | n/a | n/a | n/a | n/a | n/a | n/a |")
+              if r.get("overlay_ipv6_error"):
+                  print("")
+                  print(f"> IPv6 overlay error: `{r['overlay_ipv6_error']}`")
+          f=r.get("full_tunnel")
+          fe=r.get("full_tunnel_efficiency")
+          if f:
+              print(f"| Full tunnel | {f['download']:.2f} | {f['upload']:.2f} | {f['ping']:.2f} | {f['jitter']:.2f} | {fe['download_pct']:.2f}% | {fe['upload_pct']:.2f}% |")
+          else:
+              print("| Full tunnel | n/a | n/a | n/a | n/a | n/a | n/a |")
+          PY
+
+      - name: Upload benchmark result
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: throughput-${{ runner.os }}
+          path: |
+            throughput.json
+            awl.log
+          if-no-files-found: ignore

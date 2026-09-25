@@ -1,0 +1,354 @@
+name: Full-Tunnel Throughput
+
+on:
+  push:
+    branches:
+      - ci/throughput-benchmark
+    paths:
+      - ".github/workflows/full-tunnel-throughput.yml"
+      - ".github/ci/download-run-artifact.py"
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: "Number of direct/full-tunnel samples per client"
+        required: false
+        default: "3"
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: full-tunnel-throughput-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SAMPLE_RUNS: ${{ inputs.runs || '3' }}
+
+jobs:
+  linux-exit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 1.26.x
+          cache: true
+
+      - name: Build Linux exit
+        run: |
+          mkdir -p static
+          touch static/index.html
+          go build -o awl ./cmd/awl
+
+      - name: Start temporary AWL exit node
+        run: |
+          printf '%s\n' '{}' > config_awl.json
+          chmod +x awl
+          sudo ./awl > exit-awl.log 2>&1 &
+          echo $! > exit-awl.pid
+
+          for _ in $(seq 1 60); do
+            if ./awl cli me status >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          ./awl cli me status
+
+          ./awl cli gateway server enable
+          ./awl cli gateway status
+
+          INVITE_OUTPUT=$(./awl cli peers invite create --uses 3 --expires 20m --allow-exit-node --label throughput-ci --no-qr)
+          INVITE=$(printf '%s\n' "$INVITE_OUTPUT" | sed -n '1p')
+          test -n "$INVITE"
+          case "$INVITE" in
+            awl://*) ;;
+            *) echo "::error::unexpected invite output: $INVITE"; exit 1 ;;
+          esac
+          printf '%s\n' "$INVITE" > full-tunnel-exit-invite.txt
+
+      - name: Publish temporary exit invite
+        uses: actions/upload-artifact@v7
+        with:
+          name: full-tunnel-exit-invite
+          path: full-tunnel-exit-invite.txt
+          retention-days: 1
+
+      - name: Wait for clients
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import json, os, time, urllib.request
+
+          repo=os.environ["GITHUB_REPOSITORY"]
+          run=os.environ["GITHUB_RUN_ID"]
+          token=os.environ["GH_TOKEN"]
+          api=os.environ.get("GITHUB_API_URL","https://api.github.com")
+          want={"full-tunnel-done-Linux","full-tunnel-done-Windows"}
+          deadline=time.time()+15*60
+          headers={
+              "Authorization":f"Bearer {token}",
+              "Accept":"application/vnd.github+json",
+              "X-GitHub-Api-Version":"2022-11-28",
+              "User-Agent":"awl-throughput-ci",
+          }
+          while time.time()<deadline:
+              req=urllib.request.Request(f"{api}/repos/{repo}/actions/runs/{run}/artifacts?per_page=100",headers=headers)
+              with urllib.request.urlopen(req,timeout=30) as r:
+                  data=json.load(r)
+              have={a["name"] for a in data.get("artifacts",[]) if not a.get("expired")}
+              left=want-have
+              print("waiting for:", sorted(left))
+              if not left:
+                  raise SystemExit(0)
+              time.sleep(10)
+          raise SystemExit("timed out waiting for full-tunnel clients")
+          PY
+
+      - name: Stop exit node
+        if: always()
+        run: |
+          ./awl cli gateway server disable || true
+          if [ -f exit-awl.pid ]; then
+            sudo kill -SIGINT "$(cat exit-awl.pid)" || true
+          fi
+
+      - name: Upload exit diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: full-tunnel-exit-diagnostics
+          path: exit-awl.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+  client:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 1.26.x
+          cache: true
+
+      - name: Build AWL client
+        run: |
+          mkdir -p static
+          touch static/index.html
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            ./build.sh deps
+            go build -o awl.exe ./cmd/awl
+          else
+            go build -o awl ./cmd/awl
+          fi
+
+      - name: Install LibreSpeed CLI
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            curl -fsSL https://github.com/librespeed/speedtest-cli/releases/download/v1.0.10/librespeed-cli_1.0.10_linux_amd64.tar.gz | tar -xzf -
+          elif [ "$RUNNER_OS" = "macOS" ]; then
+            curl -fsSL https://github.com/librespeed/speedtest-cli/releases/download/v1.0.10/librespeed-cli_1.0.10_darwin_arm64.tar.gz | tar -xzf -
+          else
+            curl -fsSL https://github.com/librespeed/speedtest-cli/releases/download/v1.0.10/librespeed-cli_1.0.10_windows_amd64.zip -o download.zip
+            unzip -qo download.zip
+          fi
+          # Full-tunnel benchmark only needs the public endpoint.
+          python3 - <<'PY'
+          import json
+          json.dump([{
+              "id":1,
+              "name":"public-direct",
+              "server":"http://speedtest.anywherelan.com:8989",
+              "dlURL":"garbage",
+              "ulURL":"empty",
+              "pingURL":"empty",
+              "getIpURL":"getIP"
+          }],open("full-tunnel-librespeed.json","w"),indent=2)
+          PY
+
+      - name: Wait for temporary exit invite
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          ARTIFACT_WAIT_SECONDS: "600"
+        run: |
+          python3 .github/ci/download-run-artifact.py full-tunnel-exit-invite exit-invite
+          test -s exit-invite/full-tunnel-exit-invite.txt
+
+      - name: Start client and join exit
+        run: |
+          printf '%s\n' '{}' > config_awl.json
+          INVITE=$(cat exit-invite/full-tunnel-exit-invite.txt)
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            ./awl.exe > client-awl.log 2>&1 &
+            echo $! > client-awl.pid
+            AWL=./awl.exe
+          else
+            sudo ./awl > client-awl.log 2>&1 &
+            echo $! > client-awl.pid
+            AWL=./awl
+          fi
+
+          for _ in $(seq 1 60); do
+            if "$AWL" cli me status >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          "$AWL" cli me status
+          "$AWL" cli peers add --link "$INVITE" --name ci-exit
+
+          ONLINE=0
+          for _ in $(seq 1 90); do
+            if "$AWL" cli peers status 2>/dev/null | grep -E 'ci-exit.*online' >/dev/null; then
+              ONLINE=1
+              break
+            fi
+            sleep 2
+          done
+          "$AWL" cli peers status
+          test "$ONLINE" = "1"
+
+          AVAILABLE=0
+          for _ in $(seq 1 60); do
+            if "$AWL" cli gateway list | grep -E 'ci-exit.*\[connected\]' >/dev/null; then
+              AVAILABLE=1
+              break
+            fi
+            sleep 2
+          done
+          "$AWL" cli gateway list
+          test "$AVAILABLE" = "1"
+
+      - name: Benchmark direct versus Linux exit
+        run: |
+          python3 - <<'PY'
+          import json, os, statistics, subprocess, time
+          runs=max(1,int(os.environ.get("SAMPLE_RUNS","3")))
+          runner=os.environ["RUNNER_OS"]
+          speed="./librespeed-cli.exe" if runner=="Windows" else "./librespeed-cli"
+          awl="./awl.exe" if runner=="Windows" else "./awl"
+
+          def run_speed(label):
+              vals=[]
+              for i in range(runs):
+                  p=subprocess.run([
+                      speed,"--local-json","full-tunnel-librespeed.json",
+                      "--server","1","--json","--telemetry-level","disabled"
+                  ],text=True,capture_output=True,timeout=180)
+                  if p.returncode:
+                      raise RuntimeError(p.stderr or p.stdout)
+                  x=json.loads(p.stdout)
+                  if isinstance(x,list):
+                      if not x: raise RuntimeError("empty LibreSpeed result")
+                      x=x[0]
+                  v={k:float(x[k]) for k in ("download","upload","ping","jitter")}
+                  vals.append(v)
+                  print(f"{label} #{i+1}: {v}")
+                  time.sleep(1)
+              return vals
+
+          def median(vals):
+              return {k:round(statistics.median(v[k] for v in vals),2)
+                      for k in ("download","upload","ping","jitter")}
+
+          direct_samples=run_speed("direct")
+          direct=median(direct_samples)
+
+          subprocess.run([awl,"cli","gateway","client","use","--name","ci-exit"],check=True)
+          try:
+              full_samples=run_speed("full-tunnel")
+          finally:
+              subprocess.run([awl,"cli","gateway","client","stop"],check=False)
+          full=median(full_samples)
+
+          result={
+              "platform":runner,
+              "samples":runs,
+              "direct_samples":direct_samples,
+              "direct":direct,
+              "full_tunnel_samples":full_samples,
+              "full_tunnel":full,
+              "efficiency":{
+                  "download_pct":round(full["download"]/direct["download"]*100,2) if direct["download"] else 0,
+                  "upload_pct":round(full["upload"]/direct["upload"]*100,2) if direct["upload"] else 0,
+                  "ping_overhead_ms":round(full["ping"]-direct["ping"],2),
+              }
+          }
+          json.dump(result,open("full-tunnel-throughput.json","w"),indent=2)
+          print(json.dumps(result,indent=2))
+          PY
+
+      - name: Publish benchmark summary
+        if: always()
+        run: |
+          if [ ! -f full-tunnel-throughput.json ]; then
+            echo "## $RUNNER_OS full-tunnel throughput" >> "$GITHUB_STEP_SUMMARY"
+            echo "No completed benchmark result." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          r=json.load(open("full-tunnel-throughput.json"))
+          d,f,e=r["direct"],r["full_tunnel"],r["efficiency"]
+          print(f"## {r['platform']} -> Linux exit")
+          print("")
+          print(f"Samples per path: **{r['samples']}**")
+          print("")
+          print("| Path | Download Mbps | Upload Mbps | Ping ms | Jitter ms |")
+          print("|---|---:|---:|---:|---:|")
+          print(f"| Direct | {d['download']:.2f} | {d['upload']:.2f} | {d['ping']:.2f} | {d['jitter']:.2f} |")
+          print(f"| Full tunnel | {f['download']:.2f} | {f['upload']:.2f} | {f['ping']:.2f} | {f['jitter']:.2f} |")
+          print("")
+          print(f"- Download efficiency: **{e['download_pct']:.2f}%**")
+          print(f"- Upload efficiency: **{e['upload_pct']:.2f}%**")
+          print(f"- Ping overhead: **{e['ping_overhead_ms']:+.2f} ms**")
+          PY
+
+      - name: Upload full-tunnel benchmark
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: full-tunnel-throughput-${{ runner.os }}
+          path: |
+            full-tunnel-throughput.json
+            client-awl.log
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Signal completion to exit
+        if: always()
+        run: |
+          mkdir -p done
+          echo "$RUNNER_OS completed" > done/status.txt
+
+      - name: Upload completion marker
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: full-tunnel-done-${{ runner.os }}
+          path: done/status.txt
+          retention-days: 1
+
+      - name: Stop client
+        if: always()
+        run: |
+          AWL=./awl
+          [ "$RUNNER_OS" = "Windows" ] && AWL=./awl.exe
+          "$AWL" cli gateway client stop || true
+          if [ -f client-awl.pid ]; then
+            if [ "$RUNNER_OS" = "Windows" ]; then
+              taskkill //F //PID "$(cat client-awl.pid)" || true
+            else
+              sudo kill -SIGINT "$(cat client-awl.pid)" || true
+            fi
+          fi

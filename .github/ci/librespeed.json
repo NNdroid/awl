@@ -16,5 +16,14 @@
     "ulURL": "empty",
     "pingURL": "empty",
     "getIpURL": "getIP"
+  },
+  {
+    "id": 3,
+    "name": "awl-tester-ipv6",
+    "server": "http://[fd00:66:0:98ef:7a00:2b43:35a5:8524]:8989",
+    "dlURL": "garbage",
+    "ulURL": "empty",
+    "pingURL": "empty",
+    "getIpURL": "getIP"
   }
 ]
