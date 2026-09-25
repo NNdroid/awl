@@ -3,8 +3,12 @@ name: Full-Tunnel Throughput
 on:
   push:
     branches:
-      - ci/throughput-benchmark
+      - master
     paths:
+      - "**/*.go"
+      - "go.mod"
+      - "go.sum"
+      - "build.sh"
       - ".github/workflows/full-tunnel-throughput.yml"
       - ".github/ci/download-run-artifact.py"
   workflow_dispatch:
