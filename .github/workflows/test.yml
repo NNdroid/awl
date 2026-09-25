@@ -35,7 +35,7 @@ jobs:
         shell: bash
         run: ./build.sh deps
       - name: gofmt && go mod tidy
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-latest' && env.EXTERNAL_E2E_ENABLED == '1'
         run: |
           go mod tidy -compat=1.26
           cd cmd/awl-tray && go mod tidy -compat=1.26 && cd ../..
@@ -66,7 +66,7 @@ jobs:
         # needed. The diagnostic Get-NetNat shows what the runner image holds
         # in WinNAT (a Docker/HNS instance would conflict — decide about
         # pre-cleaning based on what this prints).
-        if: matrix.os == 'windows-latest'
+        if: matrix.os == 'windows-latest' && env.EXTERNAL_E2E_ENABLED == '1'
         shell: pwsh
         run: |
           Get-NetNat | Format-List
@@ -109,38 +109,48 @@ jobs:
         with:
           name: awl-build-${{ runner.os }}
 
-      - name: Prepare self-contained e2e config
+      - name: Prepare optional external e2e config
         env:
           CONFIG_AWL_LINUX: ${{ secrets.CONFIG_AWL_LINUX }}
           CONFIG_AWL_MACOS: ${{ secrets.CONFIG_AWL_MACOS }}
           CONFIG_AWL_WINDOWS: ${{ secrets.CONFIG_AWL_WINDOWS }}
           CONFIG_LIBRESPEED: ${{ secrets.CONFIG_LIBRESPEED }}
         run: |
-          # Forks do not inherit repository secrets. A missing platform config
-          # therefore means "generate a fresh AWL identity for this run".
-          # Stable CONFIG_AWL_* secrets remain supported for repositories whose
-          # CI identities have explicit exit-node permission on awl-tester.
+          # Forks do not inherit repository secrets. The deterministic unit,
+          # race and host-network tests do not need any secrets; only the
+          # supplemental public awl-tester e2e needs a stable, pre-authorized
+          # AWL identity.
           if [ "$RUNNER_OS" == "Linux" ]; then
             AWL_CONFIG="$CONFIG_AWL_LINUX"
-            curl -fsSL https://github.com/librespeed/speedtest-cli/releases/download/v1.0.10/librespeed-cli_1.0.10_linux_amd64.tar.gz | tar -xzf -
+            PLATFORM_SECRET="CONFIG_AWL_LINUX"
+            SPEEDTEST_ARCHIVE="https://github.com/librespeed/speedtest-cli/releases/download/v1.0.10/librespeed-cli_1.0.10_linux_amd64.tar.gz"
           elif [ "$RUNNER_OS" == "macOS" ]; then
             AWL_CONFIG="$CONFIG_AWL_MACOS"
-            curl -fsSL https://github.com/librespeed/speedtest-cli/releases/download/v1.0.10/librespeed-cli_1.0.10_darwin_arm64.tar.gz | tar -xzf -
+            PLATFORM_SECRET="CONFIG_AWL_MACOS"
+            SPEEDTEST_ARCHIVE="https://github.com/librespeed/speedtest-cli/releases/download/v1.0.10/librespeed-cli_1.0.10_darwin_arm64.tar.gz"
           elif [ "$RUNNER_OS" == "Windows" ]; then
             AWL_CONFIG="$CONFIG_AWL_WINDOWS"
-            curl -fsSL https://github.com/librespeed/speedtest-cli/releases/download/v1.0.10/librespeed-cli_1.0.10_windows_amd64.zip -o download.zip
-            unzip -qo download.zip
+            PLATFORM_SECRET="CONFIG_AWL_WINDOWS"
+            SPEEDTEST_ARCHIVE="https://github.com/librespeed/speedtest-cli/releases/download/v1.0.10/librespeed-cli_1.0.10_windows_amd64.zip"
           else
             echo "$RUNNER_OS not supported"
             exit 1
           fi
 
-          if [ -n "$AWL_CONFIG" ]; then
-            printf '%s\n' "$AWL_CONFIG" > config_awl.json
-            echo "Using stable AWL CI identity from optional repository secret."
+          if [ -z "$AWL_CONFIG" ]; then
+            echo "EXTERNAL_E2E_ENABLED=0" >> "$GITHUB_ENV"
+            echo "::notice::Skipping public awl-tester e2e on $RUNNER_OS because $PLATFORM_SECRET is not configured. Core unit/race/host-network coverage still runs."
+            exit 0
+          fi
+
+          echo "EXTERNAL_E2E_ENABLED=1" >> "$GITHUB_ENV"
+          printf '%s\n' "$AWL_CONFIG" > config_awl.json
+
+          if [ "$RUNNER_OS" == "Windows" ]; then
+            curl -fsSL "$SPEEDTEST_ARCHIVE" -o download.zip
+            unzip -qo download.zip
           else
-            printf '%s\n' '{}' > config_awl.json
-            echo "No platform AWL config secret: using an ephemeral CI identity."
+            curl -fsSL "$SPEEDTEST_ARCHIVE" | tar -xzf -
           fi
 
           if [ -n "$CONFIG_LIBRESPEED" ]; then
@@ -153,6 +163,11 @@ jobs:
 
           python3 -m json.tool config_awl.json >/dev/null
           python3 -m json.tool config_librespeed.json >/dev/null
+
+      - name: Explain skipped external e2e
+        if: env.EXTERNAL_E2E_ENABLED != '1'
+        run: |
+          echo "Public awl-tester e2e is optional. Configure this runner platform's CONFIG_AWL_* repository secret with a stable peer identity that awl-tester has authorized to enable it."
 
       - name: Run librespeed-cli, awl, librespeed-cli through awl
         if: matrix.os == 'ubuntu-latest'
@@ -269,7 +284,7 @@ jobs:
           # proves the shutdown teardown ran. (NAT/ip_forward are server-side only.)
           ! ip rule show | grep -q fwmark
       - name: Run librespeed-cli, awl, librespeed-cli through awl
-        if: matrix.os == 'macos-latest'
+        if: matrix.os == 'macos-latest' && env.EXTERNAL_E2E_ENABLED == '1'
         run: |
           chmod +x awl
           sudo ./awl &
