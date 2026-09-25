@@ -1,5 +1,12 @@
 name: Test
-on: [ push, pull_request ]
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
 jobs:
   test:
     # run job on all pushes OR external PR, not both
@@ -74,8 +81,11 @@ jobs:
           if-no-files-found: error
 
   end-to-end-test:
-    # run only on pushes because we use repository secrets which are unavailable to forks
-    if: ${{ github.event_name == 'push' }}
+    # Public mesh/speedtest e2e is self-contained. Optional CONFIG_AWL_*
+    # secrets may provide stable identities that the public tester has granted
+    # exit-node permission to; without them, only that external exit-node
+    # subsection is skipped.
+    if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
     needs: [ test ]
     strategy:
       fail-fast: false
@@ -86,33 +96,58 @@ jobs:
       run:
         shell: bash
     steps:
+      - name: Checkout CI support files
+        uses: actions/checkout@v6
+
       - name: Retrieve saved cmd/awl build
         uses: actions/download-artifact@v8
         with:
           name: awl-build-${{ runner.os }}
-      - name: Download librespeed-cli
+
+      - name: Prepare self-contained e2e config
         env:
           CONFIG_AWL_LINUX: ${{ secrets.CONFIG_AWL_LINUX }}
           CONFIG_AWL_MACOS: ${{ secrets.CONFIG_AWL_MACOS }}
           CONFIG_AWL_WINDOWS: ${{ secrets.CONFIG_AWL_WINDOWS }}
           CONFIG_LIBRESPEED: ${{ secrets.CONFIG_LIBRESPEED }}
         run: |
+          # Forks do not inherit repository secrets. A missing platform config
+          # therefore means "generate a fresh AWL identity for this run".
+          # Stable CONFIG_AWL_* secrets remain supported for repositories whose
+          # CI identities have explicit exit-node permission on awl-tester.
           if [ "$RUNNER_OS" == "Linux" ]; then
-               curl -sSL https://github.com/librespeed/speedtest-cli/releases/download/v1.0.10/librespeed-cli_1.0.10_linux_amd64.tar.gz | tar -xzf -
-               echo $CONFIG_AWL_LINUX > config_awl.json
+            AWL_CONFIG="$CONFIG_AWL_LINUX"
+            curl -fsSL https://github.com/librespeed/speedtest-cli/releases/download/v1.0.10/librespeed-cli_1.0.10_linux_amd64.tar.gz | tar -xzf -
           elif [ "$RUNNER_OS" == "macOS" ]; then
-               curl -sSL https://github.com/librespeed/speedtest-cli/releases/download/v1.0.10/librespeed-cli_1.0.10_darwin_arm64.tar.gz | tar -xzf -
-               echo $CONFIG_AWL_MACOS > config_awl.json
+            AWL_CONFIG="$CONFIG_AWL_MACOS"
+            curl -fsSL https://github.com/librespeed/speedtest-cli/releases/download/v1.0.10/librespeed-cli_1.0.10_darwin_arm64.tar.gz | tar -xzf -
           elif [ "$RUNNER_OS" == "Windows" ]; then
-               curl -sSL https://github.com/librespeed/speedtest-cli/releases/download/v1.0.10/librespeed-cli_1.0.10_windows_amd64.zip > download.zip
-               unzip download.zip
-               echo $CONFIG_AWL_WINDOWS > config_awl.json
+            AWL_CONFIG="$CONFIG_AWL_WINDOWS"
+            curl -fsSL https://github.com/librespeed/speedtest-cli/releases/download/v1.0.10/librespeed-cli_1.0.10_windows_amd64.zip -o download.zip
+            unzip -q download.zip
           else
-               echo "$RUNNER_OS not supported"
-               exit 1
+            echo "$RUNNER_OS not supported"
+            exit 1
           fi
 
-          echo $CONFIG_LIBRESPEED > config_librespeed.json
+          if [ -n "$AWL_CONFIG" ]; then
+            printf '%s\n' "$AWL_CONFIG" > config_awl.json
+            echo "Using stable AWL CI identity from optional repository secret."
+          else
+            printf '%s\n' '{}' > config_awl.json
+            echo "No platform AWL config secret: using an ephemeral CI identity."
+          fi
+
+          if [ -n "$CONFIG_LIBRESPEED" ]; then
+            printf '%s\n' "$CONFIG_LIBRESPEED" > config_librespeed.json
+            echo "Using optional CONFIG_LIBRESPEED override."
+          else
+            cp .github/ci/librespeed.json config_librespeed.json
+            echo "Using repository public LibreSpeed endpoints."
+          fi
+
+          python3 -m json.tool config_awl.json >/dev/null
+          python3 -m json.tool config_librespeed.json >/dev/null
 
       - name: Run librespeed-cli, awl, librespeed-cli through awl
         if: matrix.os == 'ubuntu-latest'
