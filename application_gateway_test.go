@@ -217,6 +217,30 @@ func TestGatewayBidirectionalIPv6(t *testing.T) {
 	ts.Equal(clientLocalIPv6.String(), dst.String())
 }
 
+// TestGatewayClientPassesBypassCIDRsToNetManager verifies the persisted
+// split-tunnel configuration reaches the OS networking layer when the gateway
+// client is enabled. The Windows-specific tests cover what that layer does
+// with the prefixes; this test pins the cross-platform service plumbing.
+func TestGatewayClientPassesBypassCIDRsToNetManager(t *testing.T) {
+	skipIfVPNGatewayUnsupported(t)
+	ts := NewTestSuite(t)
+	client, exitNode, _ := setupGatewayPeers(ts)
+
+	want := []string{"2001:4860::/32", "203.0.113.7/32"}
+	client.app.Conf.Lock()
+	client.app.Conf.VPNGateway.ClientBypassCIDRs = append([]string(nil), want...)
+	client.app.Conf.Unlock()
+
+	mgr, ok := client.app.NetManager.(*testNetManager)
+	ts.True(ok, "test peer must use testNetManager")
+	ts.False(mgr.ClientRoutesActive(), "setupGatewayPeers binds only the tunnel; OS routes must still be off")
+
+	ts.NoError(client.api.EnableVPNGatewayClient(exitNode.PeerID()))
+	ts.True(mgr.ClientRoutesActive())
+	ts.Equal(want, mgr.ClientBypassCIDRs(),
+		"VPNGateway.applyClient must pass configured bypass CIDRs to NetManager")
+}
+
 // TestGatewayPermissionDenied covers two complementary revocation paths:
 //
 //  1. Defence-in-depth on the exit-node side: even if a client somehow
