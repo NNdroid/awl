@@ -2,6 +2,7 @@ package vpn
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/hex"
 	"io"
 	"net"
@@ -33,6 +34,124 @@ func TestPacket_RecalculateChecksum_IPv6(t *testing.T) {
 	firstRecalculate := append([]byte(nil), packet.Packet...)
 	packet.RecalculateChecksum()
 	a.Equal(firstRecalculate, packet.Packet)
+}
+
+func TestPacket_RecalculateChecksum_IPv6DestinationOptions(t *testing.T) {
+	src := net.ParseIP("fd00:66::1").To16()
+	dst := net.ParseIP("2001:4860:4860::8888").To16()
+	newSrc := net.ParseIP("fd00:66::2").To16()
+	require.NotNil(t, src)
+	require.NotNil(t, dst)
+	require.NotNil(t, newSrc)
+
+	udp := make([]byte, 8+12)
+	binary.BigEndian.PutUint16(udp[0:], 1234)
+	binary.BigEndian.PutUint16(udp[2:], 443)
+	binary.BigEndian.PutUint16(udp[4:], uint16(len(udp)))
+	copy(udp[8:], []byte("hello-ipv6!!"))
+
+	raw := make([]byte, 40+8+len(udp))
+	raw[0] = 0x60
+	binary.BigEndian.PutUint16(raw[4:], uint16(len(raw)-40))
+	raw[6] = ipv6NextDestOpts
+	raw[7] = 64
+	copy(raw[8:24], src)
+	copy(raw[24:40], dst)
+	raw[40] = IPProtocolUDP // Destination Options -> UDP
+	raw[41] = 0             // 8-byte extension header
+	copy(raw[48:], udp)
+
+	p := new(Packet)
+	_, err := p.ReadFrom(bytes.NewReader(raw))
+	require.NoError(t, err)
+	require.True(t, p.Parse())
+
+	p.RecalculateChecksum()
+	require.NotZero(t, binary.BigEndian.Uint16(p.Packet[54:56]))
+	require.Equal(t, uint16(0),
+		checksumIPv6TCPUDP(p.Packet[48:], IPProtocolUDP, p.Src, p.Dst),
+		"checksum must validate with a Destination Options header present")
+
+	copy(p.Src, newSrc)
+	p.RecalculateChecksum()
+	require.Equal(t, uint16(0),
+		checksumIPv6TCPUDP(p.Packet[48:], IPProtocolUDP, p.Src, p.Dst),
+		"checksum must remain valid after gateway source rewrite")
+}
+
+func TestPacket_RecalculateChecksum_IPv6FirstFragmentUsesIncrementalAdjustment(t *testing.T) {
+	oldSrc := net.ParseIP("fd00:66::1").To16()
+	newSrc := net.ParseIP("fd00:66::2").To16()
+	dst := net.ParseIP("2001:4860:4860::8888").To16()
+	require.NotNil(t, oldSrc)
+	require.NotNil(t, newSrc)
+	require.NotNil(t, dst)
+
+	// Build the complete UDP datagram first so its checksum represents the
+	// reassembled packet, then place only its first bytes in fragment #0.
+	fullUDP := make([]byte, 8+24)
+	binary.BigEndian.PutUint16(fullUDP[0:], 1234)
+	binary.BigEndian.PutUint16(fullUDP[2:], 443)
+	binary.BigEndian.PutUint16(fullUDP[4:], uint16(len(fullUDP)))
+	copy(fullUDP[8:], []byte("fragmented-ipv6-payload!"))
+	oldChecksum := checksumIPv6TCPUDP(fullUDP, IPProtocolUDP, oldSrc, dst)
+	if oldChecksum == 0 {
+		oldChecksum = 0xffff
+	}
+	binary.BigEndian.PutUint16(fullUDP[6:], oldChecksum)
+
+	expectedUDP := append([]byte(nil), fullUDP...)
+	binary.BigEndian.PutUint16(expectedUDP[6:], 0)
+	expectedChecksum := checksumIPv6TCPUDP(expectedUDP, IPProtocolUDP, newSrc, dst)
+	if expectedChecksum == 0 {
+		expectedChecksum = 0xffff
+	}
+
+	const firstFragmentBytes = 16
+	raw := make([]byte, 40+8+firstFragmentBytes)
+	raw[0] = 0x60
+	binary.BigEndian.PutUint16(raw[4:], uint16(len(raw)-40))
+	raw[6] = ipv6NextFragment
+	raw[7] = 64
+	copy(raw[8:24], oldSrc)
+	copy(raw[24:40], dst)
+	raw[40] = IPProtocolUDP
+	raw[41] = 0
+	// Fragment offset = 0, M = 1.
+	binary.BigEndian.PutUint16(raw[42:], 1)
+	binary.BigEndian.PutUint32(raw[44:], 0x12345678)
+	copy(raw[48:], fullUDP[:firstFragmentBytes])
+
+	p := new(Packet)
+	_, err := p.ReadFrom(bytes.NewReader(raw))
+	require.NoError(t, err)
+	require.True(t, p.Parse())
+
+	copy(p.Src, newSrc)
+	p.RecalculateChecksum()
+	require.Equal(t, expectedChecksum, binary.BigEndian.Uint16(p.Packet[54:56]),
+		"first-fragment checksum must be adjusted for the IPv6 pseudo-header address rewrite")
+
+	first := append([]byte(nil), p.Packet...)
+	p.RecalculateChecksum()
+	require.Equal(t, first, p.Packet, "incremental fragment adjustment must be idempotent")
+}
+
+func TestIPv6UpperLayerNonFirstFragment(t *testing.T) {
+	raw := make([]byte, 40+8+8)
+	raw[0] = 0x60
+	binary.BigEndian.PutUint16(raw[4:], uint16(len(raw)-40))
+	raw[6] = ipv6NextFragment
+	raw[40] = IPProtocolUDP
+	// Fragment offset = 1 (8 bytes), M = 1.
+	binary.BigEndian.PutUint16(raw[42:], (1<<3)|1)
+
+	proto, off, fragmented, first, ok := ipv6UpperLayer(raw)
+	require.True(t, ok)
+	require.Equal(t, byte(IPProtocolUDP), proto)
+	require.Equal(t, 48, off)
+	require.True(t, fragmented)
+	require.False(t, first)
 }
 
 // TODO: bench with bigger packet
