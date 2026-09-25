@@ -300,7 +300,7 @@ jobs:
           import json
           r=json.load(open("full-tunnel-throughput.json"))
           d,f,e=r["direct"],r["full_tunnel"],r["efficiency"]
-          print(f"## {r['platform']} → Linux exit")
+          print(f"## {r['platform']} -> Linux exit")
           print("")
           print(f"Samples per path: **{r['samples']}**")
           print("")
