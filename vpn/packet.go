@@ -18,13 +18,13 @@ const (
 
 	ipv4offsetChecksum = 10
 
-	ipv6NextHopByHop  = 0
-	ipv6NextRouting   = 43
-	ipv6NextFragment  = 44
-	ipv6NextESP       = 50
-	ipv6NextAH        = 51
-	ipv6NextNoHeader  = 59
-	ipv6NextDestOpts  = 60
+	ipv6NextHopByHop = 0
+	ipv6NextRouting  = 43
+	ipv6NextFragment = 44
+	ipv6NextESP      = 50
+	ipv6NextAH       = 51
+	ipv6NextNoHeader = 59
+	ipv6NextDestOpts = 60
 )
 
 type Packet struct {
