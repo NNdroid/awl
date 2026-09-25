@@ -25,7 +25,7 @@ func TestClientFenceRules(t *testing.T) {
 	tunLUID := winipcfg.LUID(0x1234567890abcdef)
 	const appID = `\device\harddiskvolume3\awl\awl.exe`
 
-	rules, err := clientFenceRules(sublayer, tunLUID, appID)
+	rules, err := clientFenceRules(sublayer, tunLUID, appID, nil)
 	require.NoError(t, err)
 	require.Len(t, rules, 8, "3 permits + 1 block per family")
 
@@ -115,4 +115,63 @@ func TestClientFenceRules(t *testing.T) {
 	}
 	requireLocalDst(wf.LayerALEAuthConnectV4, wantLocal4)
 	requireLocalDst(wf.LayerALEAuthConnectV6, wantLocal6)
+}
+
+
+func TestParseClientBypassCIDRs(t *testing.T) {
+	got, err := parseClientBypassCIDRs([]string{
+		" 2606:4700:4700::1111/128 ",
+		"2001:4860::/32",
+		"2001:4860::/32",
+		"203.0.113.7/32",
+		"",
+	})
+	require.NoError(t, err)
+	require.Equal(t, []netip.Prefix{
+		netip.MustParsePrefix("2606:4700:4700::1111/128"),
+		netip.MustParsePrefix("2001:4860::/32"),
+		netip.MustParsePrefix("203.0.113.7/32"),
+	}, got)
+
+	_, err = parseClientBypassCIDRs([]string{"::/1"})
+	require.ErrorContains(t, err, "more specific than /1")
+
+	_, err = parseClientBypassCIDRs([]string{"0.0.0.0/0"})
+	require.ErrorContains(t, err, "more specific than /1")
+
+	_, err = parseClientBypassCIDRs([]string{"not-a-cidr"})
+	require.Error(t, err)
+}
+
+func TestClientFenceRulesPermitConfiguredBypass(t *testing.T) {
+	sublayerGUID, err := windows.GenerateGUID()
+	require.NoError(t, err)
+	sublayer := wf.SublayerID(sublayerGUID)
+	tunLUID := winipcfg.LUID(0x1234)
+	const appID = `\device\harddiskvolume3\awl\awl.exe`
+
+	bypass4 := netip.MustParsePrefix("203.0.113.7/32")
+	bypass6 := netip.MustParsePrefix("2001:4860::/32")
+	rules, err := clientFenceRules(sublayer, tunLUID, appID, []netip.Prefix{bypass4, bypass6})
+	require.NoError(t, err)
+	require.Len(t, rules, 10, "base 8 rules plus one bypass permit per family")
+
+	want := map[wf.LayerID]netip.Prefix{
+		wf.LayerALEAuthConnectV4: bypass4,
+		wf.LayerALEAuthConnectV6: bypass6,
+	}
+	found := map[wf.LayerID]bool{}
+	for _, r := range rules {
+		if !strings.Contains(r.Name, "permit configured bypass") {
+			continue
+		}
+		require.Equal(t, wf.ActionPermit, r.Action)
+		require.Equal(t, fenceWeightPermitBypass, r.Weight)
+		require.Len(t, r.Conditions, 1)
+		require.Equal(t, wf.FieldIPRemoteAddress, r.Conditions[0].Field)
+		require.Equal(t, want[r.Layer], r.Conditions[0].Value)
+		found[r.Layer] = true
+	}
+	require.True(t, found[wf.LayerALEAuthConnectV4])
+	require.True(t, found[wf.LayerALEAuthConnectV6])
 }
