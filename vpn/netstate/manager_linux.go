@@ -103,7 +103,7 @@ func (m *Manager) ControlFunc() func(network, address string, c syscall.RawConn)
 // EnableClientRoutes installs the gateway client routes on the TUN (the
 // default-route capture plus the IPv6 fail-closed fence). Idempotent: a
 // second call while routes are installed is a no-op.
-func (m *Manager) EnableClientRoutes(tunIfName string) error {
+func (m *Manager) EnableClientRoutes(tunIfName string, _ []string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
