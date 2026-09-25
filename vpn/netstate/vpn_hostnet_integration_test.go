@@ -552,10 +552,10 @@ func assertRoutesApplied(t *testing.T) {
 	table := strings.TrimSpace(cmdOut(t, "ip", "-4", "route", "show", "table", strconv.Itoa(tableID)))
 	require.NotEmpty(t, table, "original default(s) must be copied into the awl table")
 
-	// IPv6 fail-closed fence. Installed unconditionally — even with IPv6 disabled
-	// via sysctl (disable_ipv6=1 blocks addresses, not routes). It is skipped
-	// only when the IPv6 stack is absent entirely (kernel ipv6.disable=1 →
-	// /proc/sys/net/ipv6 missing), matching setupIPv6Fence's EAFNOSUPPORT path.
+	// IPv6 full-tunnel route. Installed whenever the IPv6 stack is present;
+	// marked AWL/libp2p sockets use the exemption table while ordinary IPv6
+	// traffic uses the TUN default. A kernel-level ipv6.disable=1 removes the
+	// stack entirely, in which case there is no IPv6 route state to assert.
 	if _, err := os.Stat("/proc/sys/net/ipv6"); os.IsNotExist(err) {
 		return
 	}
