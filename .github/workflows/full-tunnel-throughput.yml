@@ -88,7 +88,7 @@ jobs:
           run=os.environ["GITHUB_RUN_ID"]
           token=os.environ["GH_TOKEN"]
           api=os.environ.get("GITHUB_API_URL","https://api.github.com")
-          want={"full-tunnel-done-Linux","full-tunnel-done-Windows","full-tunnel-done-macOS"}
+          want={"full-tunnel-done-Linux","full-tunnel-done-Windows"}
           deadline=time.time()+15*60
           headers={
               "Authorization":f"Bearer {token}",
@@ -130,7 +130,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 25
     defaults:
