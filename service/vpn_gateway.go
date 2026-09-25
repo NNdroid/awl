@@ -31,7 +31,7 @@ type DNSReconfigurer interface {
 // methods are idempotent. Declared consumer-side so tests can substitute a
 // bookkeeping-only fake.
 type NetManager interface {
-	EnableClientRoutes(tunIfName string) error
+	EnableClientRoutes(tunIfName string, bypassCIDRs []string) error
 	DisableClientRoutes() error
 	ClientRoutesActive() bool
 	EnableServerNAT(awlSubnet, awlSubnet6, tunIfName string) error
@@ -360,6 +360,7 @@ func (g *VPNGateway) applyClient() error {
 
 	g.conf.RLock()
 	gatewayPeerIDStr := g.conf.VPNGateway.GatewayPeerID
+	bypassCIDRs := slices.Clone(g.conf.VPNGateway.ClientBypassCIDRs)
 	g.conf.RUnlock()
 	if gatewayPeerIDStr == "" {
 		return fmt.Errorf("no VPN gateway peer configured")
@@ -377,7 +378,7 @@ func (g *VPNGateway) applyClient() error {
 	if err != nil {
 		return fmt.Errorf("get TUN name for gateway routes: %w", err)
 	}
-	if err := g.netManager.EnableClientRoutes(tunName); err != nil {
+	if err := g.netManager.EnableClientRoutes(tunName, bypassCIDRs); err != nil {
 		return err
 	}
 
