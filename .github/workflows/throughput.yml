@@ -6,8 +6,12 @@ name: Throughput Benchmark
 on:
   push:
     branches:
-      - ci/throughput-benchmark
+      - master
     paths:
+      - "**/*.go"
+      - "go.mod"
+      - "go.sum"
+      - "build.sh"
       - ".github/workflows/throughput.yml"
       - ".github/ci/**"
   workflow_dispatch:
