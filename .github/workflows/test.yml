@@ -35,7 +35,7 @@ jobs:
         shell: bash
         run: ./build.sh deps
       - name: gofmt && go mod tidy
-        if: matrix.os == 'ubuntu-latest' && env.EXTERNAL_E2E_ENABLED == '1'
+        if: matrix.os == 'ubuntu-latest'
         run: |
           go mod tidy -compat=1.26
           cd cmd/awl-tray && go mod tidy -compat=1.26 && cd ../..
@@ -66,7 +66,7 @@ jobs:
         # needed. The diagnostic Get-NetNat shows what the runner image holds
         # in WinNAT (a Docker/HNS instance would conflict — decide about
         # pre-cleaning based on what this prints).
-        if: matrix.os == 'windows-latest' && env.EXTERNAL_E2E_ENABLED == '1'
+        if: matrix.os == 'windows-latest'
         shell: pwsh
         run: |
           Get-NetNat | Format-List
@@ -170,7 +170,7 @@ jobs:
           echo "Public awl-tester e2e is optional. Configure this runner platform's CONFIG_AWL_* repository secret with a stable peer identity that awl-tester has authorized to enable it."
 
       - name: Run librespeed-cli, awl, librespeed-cli through awl
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-latest' && env.EXTERNAL_E2E_ENABLED == '1'
         run: |
           chmod +x awl
           sudo ./awl &
@@ -302,7 +302,7 @@ jobs:
           sudo kill -SIGINT $awl_pid
           sleep 1
       - name: Run librespeed-cli, awl, librespeed-cli through awl
-        if: matrix.os == 'windows-latest'
+        if: matrix.os == 'windows-latest' && env.EXTERNAL_E2E_ENABLED == '1'
         run: |
           chmod +x awl.exe
           ./awl.exe &
