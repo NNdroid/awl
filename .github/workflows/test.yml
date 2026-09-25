@@ -129,7 +129,7 @@ jobs:
           elif [ "$RUNNER_OS" == "Windows" ]; then
             AWL_CONFIG="$CONFIG_AWL_WINDOWS"
             curl -fsSL https://github.com/librespeed/speedtest-cli/releases/download/v1.0.10/librespeed-cli_1.0.10_windows_amd64.zip -o download.zip
-            unzip -q download.zip
+            unzip -qo download.zip
           else
             echo "$RUNNER_OS not supported"
             exit 1
