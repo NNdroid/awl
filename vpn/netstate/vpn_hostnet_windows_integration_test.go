@@ -502,6 +502,7 @@ func TestGatewayHostNetClientIPv6BypassLifecycle(t *testing.T) {
 
 	const bypass = "2001:db8:1234::/48"
 	require.NoError(t, mgr.EnableClientRoutes(tunGUID, []string{bypass}))
+	t.Cleanup(func() { _ = mgr.DisableClientRoutes() })
 	require.Equal(t, 9, clientFenceRuleCount(t),
 		"one IPv6 configured-bypass permit must be added to the base fence")
 
