@@ -4,6 +4,7 @@ package netstate
 
 import (
 	"fmt"
+	"net/netip"
 
 	"golang.zx2c4.com/wireguard/windows/tunnel/winipcfg"
 )
@@ -29,6 +30,9 @@ type uplinkRoute struct {
 	IfLUID uint64
 	// IfIndex is the interface index used for IP_UNICAST_IF / IPV6_UNICAST_IF.
 	IfIndex uint32
+	// NextHop is copied from the winning default route. It is used when
+	// installing explicit gateway-client bypass routes on the physical uplink.
+	NextHop netip.Addr
 	// Metric is the effective priority: route metric + interface metric.
 	Metric uint32
 	// Up reports whether the interface is operationally up.
@@ -85,6 +89,7 @@ func bestUplinkDefault(family winipcfg.AddressFamily, excludeLUID winipcfg.LUID)
 		candidates = append(candidates, uplinkRoute{
 			IfLUID:  uint64(r.InterfaceLUID),
 			IfIndex: r.InterfaceIndex,
+			NextHop: r.NextHop.Addr(),
 			Metric:  r.Metric + ipIface.Metric,
 			Up:      ifRow.OperStatus == winipcfg.IfOperStatusUp,
 		})
