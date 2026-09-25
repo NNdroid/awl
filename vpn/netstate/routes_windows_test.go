@@ -117,7 +117,6 @@ func TestClientFenceRules(t *testing.T) {
 	requireLocalDst(wf.LayerALEAuthConnectV6, wantLocal6)
 }
 
-
 func TestParseClientBypassCIDRs(t *testing.T) {
 	got, err := parseClientBypassCIDRs([]string{
 		" 2606:4700:4700::1111/128 ",
