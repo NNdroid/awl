@@ -38,7 +38,7 @@ jobs:
         shell: bash
     env:
       SAMPLE_RUNS: ${{ inputs.runs || '3' }}
-      WANT_FULL_TUNNEL: ${{ inputs.full_tunnel == false && '0' || '1' }}
+      WANT_FULL_TUNNEL: ${{ (github.event_name == 'workflow_dispatch' && inputs.full_tunnel == false) && '0' || '1' }}
       CONFIG_AWL_LINUX: ${{ secrets.CONFIG_AWL_LINUX }}
       CONFIG_AWL_MACOS: ${{ secrets.CONFIG_AWL_MACOS }}
       CONFIG_AWL_WINDOWS: ${{ secrets.CONFIG_AWL_WINDOWS }}
@@ -55,6 +55,7 @@ jobs:
           mkdir -p static
           touch static/index.html
           if [ "$RUNNER_OS" = "Windows" ]; then
+            ./build.sh deps
             go build -o awl.exe ./cmd/awl
           else
             go build -o awl ./cmd/awl
@@ -142,7 +143,12 @@ jobs:
                   text=True, capture_output=True, timeout=180)
               if p.returncode:
                   raise RuntimeError(f"librespeed server {server} failed: {p.stderr}\n{p.stdout}")
-              return json.loads(p.stdout)
+              payload=json.loads(p.stdout)
+              if isinstance(payload, list):
+                  if not payload:
+                      raise RuntimeError("librespeed returned an empty JSON array")
+                  payload=payload[0]
+              return payload
 
           def samples(server):
               out=[]
@@ -164,7 +170,7 @@ jobs:
               def med(k): return round(statistics.median(x[k] for x in xs), 2)
               return {k:med(k) for k in ("download","upload","ping","jitter")}
 
-          result={"platform":runner,"samples":runs}
+          result={"platform":runner,"samples":runs,"tester_connected":connected}
           result["direct_samples"]=samples(1)
           result["direct"]=summary(result["direct_samples"])
 
@@ -219,6 +225,10 @@ jobs:
               if p.returncode:
                   raise SystemExit(p.stderr or p.stdout)
               r=json.loads(p.stdout)
+              if isinstance(r, list):
+                  if not r:
+                      raise SystemExit("librespeed returned an empty JSON array")
+                  r=r[0]
               x={k:float(r[k]) for k in ("download","upload","ping","jitter")}
               vals.append(x)
               print(f"full-tunnel sample #{i+1}: {x}")
@@ -252,6 +262,9 @@ jobs:
           import json
           r=json.load(open("throughput.json"))
           print(f"## {r['platform']} throughput")
+          print("")
+          print(f"- Samples per path: **{r['samples']}**")
+          print(f"- Public awl-tester connected: **{r.get('tester_connected', False)}**")
           print("")
           print("| Path | Download Mbps | Upload Mbps | Ping ms | Jitter ms | DL efficiency | UL efficiency |")
           print("|---|---:|---:|---:|---:|---:|---:|")
