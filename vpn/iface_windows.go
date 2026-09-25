@@ -89,7 +89,6 @@ func newTUN(ifname string, mtu int, localIP net.IP, ipMask net.IPMask, localIPv6
 	return tunDevice, nil
 }
 
-
 func windowsTUNPrefixes(localIP net.IP, ipMask net.IPMask, localIPv6 net.IP, ipMaskv6 net.IPMask) ([]netip.Prefix, error) {
 	ip4 := localIP.To4()
 	if ip4 == nil {
