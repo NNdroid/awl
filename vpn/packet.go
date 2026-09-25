@@ -111,6 +111,7 @@ func (data *Packet) ReadFrom(stream io.Reader) (int64, error) {
 }
 
 func (data *Packet) Parse() bool {
+	data.originalIPv6Valid = false
 	if len(data.Packet) == 0 {
 		return false
 	}
@@ -198,7 +199,7 @@ func (data *Packet) RecalculateChecksum() {
 // 1624) instead of trying to recompute it from incomplete data. Non-first
 // fragments contain no checksum field and need no transport-layer mutation.
 func (data *Packet) recalculateChecksumIPv6() {
-	if len(data.Packet) < ipv6.HeaderLen {
+	if len(data.Packet) < ipv6.HeaderLen || len(data.Src) != net.IPv6len || len(data.Dst) != net.IPv6len {
 		return
 	}
 
@@ -409,7 +410,7 @@ func checksumIPv4TCPUDP(headerAndPayload []byte, protocol uint32, srcIP net.IP, 
 	return tcpipChecksum(headerAndPayload, csum)
 }
 
-// checksumIPv6TCPUDP computes the TCP/UDP transport checksum using the IPv6
+// checksumIPv6TCPUDP computes an upper-layer checksum using the IPv6
 // pseudo-header as defined in RFC 2460 §8.1. The pseudo-header fields are:
 //
 //	source address       (16 bytes)
