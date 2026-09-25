@@ -64,25 +64,64 @@ func newTUN(ifname string, mtu int, localIP net.IP, ipMask net.IPMask, localIPv6
 	if err := setInterfaceMTU(logger, luid, winipcfg.AddressFamily(windows.AF_INET), uint32(mtu)); err != nil {
 		return nil, fmt.Errorf("set IPv4 MTU on tun: %v", err)
 	}
-	// TODO: support ipv6. Forwarding still ignores IPv6 packets (dropped in
-	// Tunnel.HandleReadPackets), but we set the system MTU best-effort so the
-	// interface is configured correctly once IPv6 lands. On hosts with IPv6
-	// disabled on the interface this Set() fails — that's expected, not fatal.
+	// Gateway client mode is dual-stack: IPv6 packets use the same Wintun
+	// data path as IPv4. Keep MTU identical across both families. Hosts with
+	// IPv6 disabled system-wide still keep working in IPv4-only mode.
 	if err := setInterfaceMTU(logger, luid, winipcfg.AddressFamily(windows.AF_INET6), uint32(mtu)); err != nil {
-		logger.Warnf("set IPv6 MTU on tun (best-effort, ipv6 unused by awl): %v", err)
+		logger.Warnf("set IPv6 MTU on tun (best-effort): %v", err)
 	}
 
-	ones, _ := ipMask.Size()
-	netipAddr := netip.MustParseAddr(localIP.String())
-	prefix := netip.PrefixFrom(netipAddr, ones)
-
-	err = luid.SetIPAddresses([]netip.Prefix{prefix})
+	prefixes, err := windowsTUNPrefixes(localIP, ipMask, localIPv6, ipMaskv6)
 	if err != nil {
-		return nil, fmt.Errorf("unable to setup interface IP: %v", err)
+		return nil, err
+	}
+	if len(prefixes) > 1 {
+		if _, err := luid.IPInterface(windows.AF_INET6); err != nil {
+			logger.Warnf("IPv6 stack unavailable on Wintun; continuing IPv4-only: %v", err)
+			prefixes = prefixes[:1]
+		}
+	}
+	if err = luid.SetIPAddresses(prefixes); err != nil {
+		return nil, fmt.Errorf("unable to setup interface IP addresses: %v", err)
 	}
 
 	success = true
 	return tunDevice, nil
+}
+
+
+func windowsTUNPrefixes(localIP net.IP, ipMask net.IPMask, localIPv6 net.IP, ipMaskv6 net.IPMask) ([]netip.Prefix, error) {
+	ip4 := localIP.To4()
+	if ip4 == nil {
+		return nil, fmt.Errorf("invalid IPv4 TUN address %q", localIP)
+	}
+	ones4, bits4 := ipMask.Size()
+	if bits4 != 32 {
+		return nil, fmt.Errorf("invalid IPv4 TUN mask %v", ipMask)
+	}
+	addr4, ok := netip.AddrFromSlice(ip4)
+	if !ok {
+		return nil, fmt.Errorf("convert IPv4 TUN address %q", localIP)
+	}
+	prefixes := []netip.Prefix{netip.PrefixFrom(addr4, ones4)}
+
+	if localIPv6 == nil {
+		return prefixes, nil
+	}
+	ip6 := localIPv6.To16()
+	if ip6 == nil || localIPv6.To4() != nil {
+		return nil, fmt.Errorf("invalid IPv6 TUN address %q", localIPv6)
+	}
+	ones6, bits6 := ipMaskv6.Size()
+	if bits6 != 128 {
+		return nil, fmt.Errorf("invalid IPv6 TUN mask %v", ipMaskv6)
+	}
+	addr6, ok := netip.AddrFromSlice(ip6)
+	if !ok {
+		return nil, fmt.Errorf("convert IPv6 TUN address %q", localIPv6)
+	}
+	prefixes = append(prefixes, netip.PrefixFrom(addr6, ones6))
+	return prefixes, nil
 }
 
 func (d *Device) InterfaceName() (string, error) {
