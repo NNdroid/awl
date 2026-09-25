@@ -31,7 +31,7 @@ fi
 online=false
 for _ in $(seq 1 45); do
   STATUS=$("$AWL" cli peers status 2>/dev/null || true)
-  if printf '%s\n' "$STATUS" | grep -E "$TESTER_NAME.*online" >/dev/null; then
+  if printf '%s\n' "$STATUS" | grep -E "$TESTER_NAME.*\\[connected\\]" >/dev/null; then
     online=true
     break
   fi
