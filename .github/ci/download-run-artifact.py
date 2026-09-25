@@ -6,6 +6,7 @@ import json
 import os
 import sys
 import time
+import urllib.error
 import urllib.request
 import zipfile
 
@@ -38,8 +39,27 @@ while time.time() < deadline:
     matches = [a for a in payload.get("artifacts", []) if a.get("name") == name and not a.get("expired")]
     if matches:
         artifact = max(matches, key=lambda a: a["id"])
+        # GitHub returns a short-lived signed blob URL. Do not forward the
+        # GitHub Authorization header to that storage host: Azure rejects it
+        # and answers 401. Capture the redirect, then fetch the signed URL
+        # without repository credentials.
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, hdrs, newurl):
+                return None
+
         req = urllib.request.Request(artifact["archive_download_url"], headers=headers)
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        opener = urllib.request.build_opener(NoRedirect)
+        try:
+            opener.open(req, timeout=30)
+            raise RuntimeError("artifact download endpoint did not redirect")
+        except urllib.error.HTTPError as e:
+            if e.code not in (301, 302, 303, 307, 308):
+                raise
+            location = e.headers.get("Location")
+            if not location:
+                raise RuntimeError("artifact redirect missing Location header") from e
+
+        with urllib.request.urlopen(location, timeout=60) as resp:
             data = resp.read()
         os.makedirs(destination, exist_ok=True)
         with zipfile.ZipFile(io.BytesIO(data)) as zf:
