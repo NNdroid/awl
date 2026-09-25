@@ -151,7 +151,7 @@ func TestGatewayHostNetRoutesLifecycle(t *testing.T) {
 
 	mgr := NewManager()
 	for cycle := 1; cycle <= 2; cycle++ {
-		require.NoError(t, mgr.EnableClientRoutes(testTunIf), "cycle %d", cycle)
+		require.NoError(t, mgr.EnableClientRoutes(testTunIf, nil), "cycle %d", cycle)
 		require.True(t, mgr.ClientRoutesActive(), "cycle %d", cycle)
 
 		assertRoutesApplied(t)
@@ -182,7 +182,7 @@ func TestGatewayHostNetRoutesStaleRecovery(t *testing.T) {
 	// on purpose for cleanupStaleRoutes to recover, exactly like a process that
 	// died before teardown.
 	mgr1 := NewManager()
-	require.NoError(t, mgr1.EnableClientRoutes(testTunIf))
+	require.NoError(t, mgr1.EnableClientRoutes(testTunIf, nil))
 	applied1 := snapshotNet(t)
 
 	// Simulate the TUN dying: deleting awl0 makes the kernel auto-remove the
@@ -190,7 +190,7 @@ func TestGatewayHostNetRoutesStaleRecovery(t *testing.T) {
 	recreateDummyTun(t)
 
 	mgr2 := NewManager()
-	require.NoError(t, mgr2.EnableClientRoutes(testTunIf),
+	require.NoError(t, mgr2.EnableClientRoutes(testTunIf, nil),
 		"re-setup must recover orphaned ip rule + table routes (cleanupStaleRoutes)")
 	require.Equal(t, applied1, snapshotNet(t), "recovered state must match a clean single setup")
 
@@ -223,7 +223,7 @@ func TestGatewayHostNetRoutesLeftoverTunRouteErrors(t *testing.T) {
 	t.Cleanup(func() { _ = netlink.RouteDel(leftover) })
 
 	mgr := NewManager()
-	err = mgr.EnableClientRoutes(testTunIf)
+	err = mgr.EnableClientRoutes(testTunIf, nil)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "leftover from a prior awl run",
 		"a colliding TUN default must produce the operator-facing diagnostic")
@@ -254,7 +254,7 @@ func TestGatewayHostNetRoutesStalenessReconcile(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	require.NoError(t, mgr.Start(ctx))
-	require.NoError(t, mgr.EnableClientRoutes(testTunIf))
+	require.NoError(t, mgr.EnableClientRoutes(testTunIf, nil))
 	t.Cleanup(func() { _ = mgr.DisableClientRoutes() })
 
 	// A second dummy "uplink" with an on-link subnet and its own default route,
@@ -313,7 +313,7 @@ func TestGatewayHostNetRoutesStalenessReconcileV6(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	require.NoError(t, mgr.Start(ctx))
-	require.NoError(t, mgr.EnableClientRoutes(testTunIf))
+	require.NoError(t, mgr.EnableClientRoutes(testTunIf, nil))
 	t.Cleanup(func() { _ = mgr.DisableClientRoutes() })
 
 	// A second dummy "uplink" with an on-link v6 subnet and its own v6 default,
@@ -386,7 +386,7 @@ func TestGatewayHostNetRoutesOfflineEnableSelfHeals(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	require.NoError(t, mgr.Start(ctx))
-	require.NoError(t, mgr.EnableClientRoutes(testTunIf),
+	require.NoError(t, mgr.EnableClientRoutes(testTunIf, nil),
 		"offline enable must proceed with a warning, not fail")
 	t.Cleanup(func() { _ = mgr.DisableClientRoutes() })
 	require.True(t, mgr.ClientRoutesActive())
