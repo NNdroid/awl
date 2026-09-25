@@ -288,6 +288,7 @@ jobs:
           print("")
           print(f"- Samples per path: **{r['samples']}**")
           print(f"- Public awl-tester connected: **{r.get('tester_connected', False)}**")
+          print("- Efficiency is an observational ratio against the direct public endpoint in the same run; values above 100% can occur from runner/server/path variance and do not imply tunnel acceleration.")
           print("")
           print("| Path | Download Mbps | Upload Mbps | Ping ms | Jitter ms | DL efficiency | UL efficiency |")
           print("|---|---:|---:|---:|---:|---:|---:|")
