@@ -678,6 +678,7 @@ type testNetManager struct {
 	serverActive      bool
 	clientEnableCount int
 	serverEnableCount int
+	clientBypassCIDRs []string
 }
 
 func (m *testNetManager) Start(_ context.Context) error { return nil }
@@ -685,13 +686,14 @@ func (m *testNetManager) ControlFunc() func(network, address string, c syscall.R
 	return nil
 }
 
-func (m *testNetManager) EnableClientRoutes(_ string, _ []string) error {
+func (m *testNetManager) EnableClientRoutes(_ string, bypassCIDRs []string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if !m.clientActive {
 		m.clientActive = true
 		m.clientEnableCount++
 	}
+	m.clientBypassCIDRs = append([]string(nil), bypassCIDRs...)
 	return nil
 }
 
@@ -737,4 +739,10 @@ func (m *testNetManager) ClientEnables() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.clientEnableCount
+}
+
+func (m *testNetManager) ClientBypassCIDRs() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.clientBypassCIDRs...)
 }
