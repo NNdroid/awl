@@ -174,17 +174,38 @@ jobs:
           result["direct_samples"]=samples(1)
           result["direct"]=summary(result["direct_samples"])
 
+          def efficiency(value):
+              if not value:
+                  return None
+              return {
+                  "download_pct": round(value["download"]/result["direct"]["download"]*100,2) if result["direct"]["download"] else 0,
+                  "upload_pct": round(value["upload"]/result["direct"]["upload"]*100,2) if result["direct"]["upload"] else 0,
+                  "ping_overhead_ms": round(value["ping"]-result["direct"]["ping"],2),
+              }
+
           if connected:
               result["overlay_samples"]=samples(2)
               result["overlay"]=summary(result["overlay_samples"])
-              result["overlay_efficiency"]={
-                  "download_pct": round(result["overlay"]["download"]/result["direct"]["download"]*100,2) if result["direct"]["download"] else 0,
-                  "upload_pct": round(result["overlay"]["upload"]/result["direct"]["upload"]*100,2) if result["direct"]["upload"] else 0,
-                  "ping_overhead_ms": round(result["overlay"]["ping"]-result["direct"]["ping"],2),
-              }
+              result["overlay_efficiency"]=efficiency(result["overlay"])
+
+              # Server 3 is the same awl-tester LibreSpeed service addressed
+              # through its AWL IPv6 address. Keep it non-fatal on platforms
+              # where the IPv6 overlay is unavailable, but preserve the error
+              # in the artifact instead of silently dropping the measurement.
+              try:
+                  result["overlay_ipv6_samples"]=samples(3)
+                  result["overlay_ipv6"]=summary(result["overlay_ipv6_samples"])
+                  result["overlay_ipv6_efficiency"]=efficiency(result["overlay_ipv6"])
+              except Exception as e:
+                  result["overlay_ipv6"]=None
+                  result["overlay_ipv6_efficiency"]=None
+                  result["overlay_ipv6_error"]=str(e)
+                  print(f"IPv6 overlay benchmark unavailable: {e}")
           else:
               result["overlay"]=None
               result["overlay_efficiency"]=None
+              result["overlay_ipv6"]=None
+              result["overlay_ipv6_efficiency"]=None
 
           with open("throughput.json","w") as f:
               json.dump(result,f,indent=2)
@@ -194,7 +215,6 @@ jobs:
 
       - name: Attempt full-tunnel throughput
         if: env.TESTER_CONNECTED == '1' && env.WANT_FULL_TUNNEL == '1'
-        continue-on-error: true
         run: |
           AWL=./awl
           [ "$RUNNER_OS" = "Windows" ] && AWL=./awl.exe
@@ -273,9 +293,18 @@ jobs:
           o=r.get("overlay")
           oe=r.get("overlay_efficiency")
           if o:
-              print(f"| AWL overlay | {o['download']:.2f} | {o['upload']:.2f} | {o['ping']:.2f} | {o['jitter']:.2f} | {oe['download_pct']:.2f}% | {oe['upload_pct']:.2f}% |")
+              print(f"| AWL overlay IPv4 | {o['download']:.2f} | {o['upload']:.2f} | {o['ping']:.2f} | {o['jitter']:.2f} | {oe['download_pct']:.2f}% | {oe['upload_pct']:.2f}% |")
           else:
-              print("| AWL overlay | n/a | n/a | n/a | n/a | n/a | n/a |")
+              print("| AWL overlay IPv4 | n/a | n/a | n/a | n/a | n/a | n/a |")
+          o6=r.get("overlay_ipv6")
+          oe6=r.get("overlay_ipv6_efficiency")
+          if o6:
+              print(f"| AWL overlay IPv6 | {o6['download']:.2f} | {o6['upload']:.2f} | {o6['ping']:.2f} | {o6['jitter']:.2f} | {oe6['download_pct']:.2f}% | {oe6['upload_pct']:.2f}% |")
+          else:
+              print("| AWL overlay IPv6 | n/a | n/a | n/a | n/a | n/a | n/a |")
+              if r.get("overlay_ipv6_error"):
+                  print("")
+                  print(f"> IPv6 overlay error: `{r['overlay_ipv6_error']}`")
           f=r.get("full_tunnel")
           fe=r.get("full_tunnel_efficiency")
           if f:
