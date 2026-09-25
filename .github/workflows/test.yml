@@ -154,13 +154,11 @@ jobs:
         run: |
           chmod +x awl
           sudo ./awl &
+          bash .github/ci/connect-public-tester.sh ./awl
 
           ./librespeed-cli --local-json config_librespeed.json --server 1 --json --share --telemetry-level disabled | python3 -m json.tool
 
-          sleep 10
           awl_pid=`jobs -l | grep './awl' | awk '{print $2}'`
-          ./awl cli peers status
-
           ./librespeed-cli --local-json config_librespeed.json --server 2 --json --share --telemetry-level disabled | python3 -m json.tool
 
           ping 10.66.0.2 -w 20 -c 10
@@ -261,13 +259,11 @@ jobs:
         run: |
           chmod +x awl
           sudo ./awl &
+          bash .github/ci/connect-public-tester.sh ./awl
 
           ./librespeed-cli --local-json config_librespeed.json --server 1 --json --share --telemetry-level disabled | python3 -m json.tool
 
-          sleep 10
           awl_pid=`jobs -l | grep './awl' | awk '{print $2}'`
-          ./awl cli peers status
-
           ./librespeed-cli --local-json config_librespeed.json --server 2 --json --share --telemetry-level disabled | python3 -m json.tool
 
           ping 10.66.0.2 -c 10
@@ -281,13 +277,11 @@ jobs:
         run: |
           chmod +x awl.exe
           ./awl.exe &
+          bash .github/ci/connect-public-tester.sh ./awl.exe
 
           ./librespeed-cli.exe --local-json config_librespeed.json --server 1 --json --share --telemetry-level disabled | python3 -m json.tool
 
-          sleep 10
           awl_pid=`jobs -l | grep './awl' | awk '{print $2}'`
-          ./awl.exe cli peers status
-
           ./librespeed-cli.exe --local-json config_librespeed.json --server 2 --json --share --telemetry-level disabled | python3 -m json.tool
 
           ping -w 20000 -n 10 10.66.0.2
