@@ -1,5 +1,8 @@
 name: Throughput Benchmark
 
+# Direct and AWL overlay (IPv4 + IPv6) benchmark.
+# Full-tunnel throughput is covered by full-tunnel-throughput.yml.
+
 on:
   push:
     branches:
