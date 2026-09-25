@@ -685,7 +685,7 @@ func (m *testNetManager) ControlFunc() func(network, address string, c syscall.R
 	return nil
 }
 
-func (m *testNetManager) EnableClientRoutes(_ string) error {
+func (m *testNetManager) EnableClientRoutes(_ string, _ []string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if !m.clientActive {
