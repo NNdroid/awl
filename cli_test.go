@@ -468,8 +468,15 @@ func TestCLI_AddPeerViaInviteLink(t *testing.T) {
 // when --link arrived, so the combinations it accepts are now checked by hand.
 func TestCLI_PeersAddLinkErrors(t *testing.T) {
 	ts := NewTestSuite(t)
-	peer1 := ts.NewTestPeer(false)
-	peer2 := ts.NewTestPeer(false)
+	// This test validates CLI argument combinations only; it never exercises
+	// SOCKS5. Disable the listener so an unrelated ephemeral-port TOCTOU cannot
+	// make the test fail before the CLI assertions run.
+	noSOCKS := func(c *config.Config) {
+		c.SOCKS5.ListenerEnabled = false
+		c.SOCKS5.ProxyingEnabled = false
+	}
+	peer1 := ts.NewTestPeerWithConfig(noSOCKS)
+	peer2 := ts.NewTestPeerWithConfig(noSOCKS)
 
 	link := entity.BuildInviteLink(peer2.PeerID(), "", "")
 

@@ -181,6 +181,14 @@ func TestGatewayBidirectionalIPv6(t *testing.T) {
 	ts.NotEmpty(clientPeerOnExit.IPAddrV6,
 		"exit node must know the client's AWL IPv6 address")
 
+	// Status propagation updates Config before the tunnel's peer map is
+	// necessarily refreshed. Under -race that gap is large enough for the
+	// first IPv6 gateway packet to be dropped because vp.localIPv6 is still
+	// nil. Refresh explicitly so this data-plane test starts from the state it
+	// intends to exercise rather than depending on goroutine scheduling.
+	client.app.Tunnel.RefreshPeersList()
+	exitNode.app.Tunnel.RefreshPeersList()
+
 	exitInbound := captureInbound(exitNode, 10)
 	clientInbound := captureInbound(client, 10)
 
@@ -192,9 +200,17 @@ func TestGatewayBidirectionalIPv6(t *testing.T) {
 		clientLocalIPv6.String(),
 		internetIPv6,
 	)
-	client.tun.Outbound <- [][]byte{outPacket}
-
-	rawPkt, ok := recvPacketWithTimeout(exitInbound)
+	var rawPkt []byte
+	ok = false
+	deadline := time.Now().Add(10 * time.Second)
+	for !ok && time.Now().Before(deadline) {
+		client.tun.Outbound <- [][]byte{outPacket}
+		select {
+		case rawPkt = <-exitInbound:
+			ok = true
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
 	ts.True(ok, "exit node should receive outbound IPv6 gateway packet")
 	src, dst := parsePacketIPs(rawPkt)
 	ts.Equal(clientPeerOnExit.IPAddrV6, src.String())
@@ -208,9 +224,16 @@ func TestGatewayBidirectionalIPv6(t *testing.T) {
 		internetIPv6,
 		clientPeerOnExit.IPAddrV6,
 	)
-	exitNode.tun.Outbound <- [][]byte{returnPacket}
-
-	rawPkt, ok = recvPacketWithTimeout(clientInbound)
+	ok = false
+	deadline = time.Now().Add(10 * time.Second)
+	for !ok && time.Now().Before(deadline) {
+		exitNode.tun.Outbound <- [][]byte{returnPacket}
+		select {
+		case rawPkt = <-clientInbound:
+			ok = true
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
 	ts.True(ok, "client should receive return IPv6 gateway packet")
 	src, dst = parsePacketIPs(rawPkt)
 	ts.Equal(internetIPv6, src.String())

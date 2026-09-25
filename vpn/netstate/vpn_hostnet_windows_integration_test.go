@@ -486,7 +486,6 @@ func TestGatewayHostNetClientRoutesLifecycle(t *testing.T) {
 	}
 }
 
-
 func TestGatewayHostNetClientIPv6BypassLifecycle(t *testing.T) {
 	verifyNoLeaks(t)
 	requireAdmin(t)

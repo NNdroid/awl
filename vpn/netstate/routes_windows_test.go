@@ -117,7 +117,6 @@ func TestClientFenceRules(t *testing.T) {
 	requireLocalDst(wf.LayerALEAuthConnectV6, wantLocal6)
 }
 
-
 func TestParseClientBypassCIDRs(t *testing.T) {
 	got, err := parseClientBypassCIDRs([]string{
 		" 2606:4700:4700::1111/128 ",
@@ -166,7 +165,7 @@ func TestClientFenceRulesPermitConfiguredBypass(t *testing.T) {
 			continue
 		}
 		require.Equal(t, wf.ActionPermit, r.Action)
-		require.Equal(t, fenceWeightPermitBypass, r.Weight)
+		require.Equal(t, uint64(fenceWeightPermitBypass), r.Weight)
 		require.Len(t, r.Conditions, 1)
 		require.Equal(t, wf.FieldIPRemoteAddress, r.Conditions[0].Field)
 		require.Equal(t, want[r.Layer], r.Conditions[0].Value)

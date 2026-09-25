@@ -1,0 +1,20 @@
+[
+  {
+    "id": 1,
+    "name": "public-direct",
+    "server": "http://speedtest.anywherelan.com:8989",
+    "dlURL": "garbage",
+    "ulURL": "empty",
+    "pingURL": "empty",
+    "getIpURL": "getIP"
+  },
+  {
+    "id": 2,
+    "name": "awl-tester",
+    "server": "http://10.66.0.2:8989",
+    "dlURL": "garbage",
+    "ulURL": "empty",
+    "pingURL": "empty",
+    "getIpURL": "getIP"
+  }
+]
