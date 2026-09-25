@@ -27,7 +27,7 @@ func (m *Manager) ControlFunc() func(network, address string, c syscall.RawConn)
 }
 
 // EnableClientRoutes is not supported on this platform.
-func (m *Manager) EnableClientRoutes(_ string) error {
+func (m *Manager) EnableClientRoutes(_ string, _ []string) error {
 	return errors.New("setup gateway routes: gateway routes not supported on this platform")
 }
 

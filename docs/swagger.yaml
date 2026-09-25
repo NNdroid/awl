@@ -207,6 +207,12 @@ definitions:
     type: object
   config.VPNGatewayConfig:
     properties:
+      clientBypassCIDRs:
+        description: Destination CIDRs that stay on the physical uplink while VPN
+          gateway client mode is enabled. Currently applied by the Windows client.
+        items:
+          type: string
+        type: array
       clientEnabled:
         description: ClientEnabled — route all traffic through GatewayPeerID (client
           side).

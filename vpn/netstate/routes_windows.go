@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/netip"
 	"os"
+	"strings"
 
 	"github.com/tailscale/wf"
 	"golang.org/x/sys/windows"
@@ -23,16 +24,24 @@ const (
 	// permits must all outrank the block; the gaps leave room for future
 	// rules. (The sublayer's own weight is wfpSublayerWeight, shared with the
 	// server filter — see nat_windows.go.)
-	fenceWeightPermitApp   = 4000
-	fenceWeightPermitTun   = 3000
-	fenceWeightPermitLocal = 2000
-	fenceWeightBlock       = 1000
+	fenceWeightPermitApp    = 4000
+	fenceWeightPermitTun    = 3000
+	fenceWeightPermitBypass = 2500
+	fenceWeightPermitLocal  = 2000
+	fenceWeightBlock        = 1000
+
+	// Bypass routes only need to be more specific than the /1 full-tunnel
+	// capture. A deliberately high metric lets any equally-specific connected
+	// route supplied by Windows win naturally.
+	bypassRouteMetric = 5000
 )
 
 // routeState holds the state needed to teardown gateway routes on Windows.
 type routeState struct {
-	tunLUID winipcfg.LUID
-	routes  []winipcfg.MibIPforwardRow2
+	tunLUID        winipcfg.LUID
+	routes         []winipcfg.MibIPforwardRow2
+	bypassRoutes   []winipcfg.MibIPforwardRow2
+	bypassPrefixes []netip.Prefix
 	// wfpSession holds the leak fence (see setupClientFence). Dynamic: the
 	// kernel removes its sublayer and rules when the session closes or the
 	// process dies.
@@ -43,15 +52,13 @@ type routeState struct {
 //
 //   - 0.0.0.0/1 + 128.0.0.0/1 via the TUN. More specific than the existing /0
 //     default, so they win longest-prefix-match without replacing it.
-//   - ::/1 + 8000::/1 via the TUN — the IPv6 fail-closed fence. awl does not
-//     tunnel IPv6 (HandleReadPackets drops IsIPv6), so captured v6 packets die
-//     in userspace instead of leaking around the gateway. Installed
-//     unconditionally rather than "if v6 connectivity exists": both the v6
-//     address and the ::/0 default arrive from RA (SLAAC), so at enable time
-//     they may not exist yet and appear seconds later — a presence check
-//     would be fail-open. If route creation fails because the TUN adapter
-//     simply has no IPv6 stack (disabled system-wide), that is tolerated with
-//     a warning; any other failure fails the setup (fail-closed).
+//   - ::/1 + 8000::/1 via the TUN. Together they capture all IPv6 traffic
+//     without deleting the physical ::/0. IPv6 uses the same
+//     GatewayDirForward/GatewayDirReturn data path as IPv4, so a Windows
+//     client can use a Linux exit node's IPv6 forwarding/NAT66 path.
+//   - Optional bypass CIDRs are installed as more-specific routes on the
+//     physical uplink and explicitly permitted by the WFP leak fence. When
+//     the uplink changes, Manager re-creates those routes on the new uplink.
 //
 // Before any route goes in, the WFP leak fence goes up (setupClientFence):
 // fail-closed ordering, so there is never a window where the /1 capture is
@@ -62,17 +69,22 @@ type routeState struct {
 // families (on Linux the v6 fence survives a crash; Windows is weaker here,
 // documented in GATEWAY_FEATURE.md). The WFP fence dies with the process too
 // (dynamic session), consistently with the routes.
-func (m *Manager) setupGatewayRoutes(tunIfName string) (*routeState, error) {
+func (m *Manager) setupGatewayRoutes(tunIfName string, bypassCIDRs []string) (*routeState, error) {
 	luid, err := luidFromGUIDName(tunIfName)
 	if err != nil {
 		return nil, fmt.Errorf("resolve TUN interface: %w", err)
 	}
-
-	state := &routeState{
-		tunLUID: luid,
+	bypassPrefixes, err := parseClientBypassCIDRs(bypassCIDRs)
+	if err != nil {
+		return nil, err
 	}
 
-	if err := setupClientFence(state); err != nil {
+	state := &routeState{
+		tunLUID:        luid,
+		bypassPrefixes: bypassPrefixes,
+	}
+
+	if err := setupClientFence(state, bypassPrefixes); err != nil {
 		_ = m.teardownGatewayRoutes(state)
 		return nil, fmt.Errorf("setup leak fence: %w", err)
 	}
@@ -98,18 +110,136 @@ func (m *Manager) setupGatewayRoutes(tunIfName string) (*routeState, error) {
 			continue
 		}
 		if !tunHasIPv6(luid) {
-			// The same condition that makes setInterfaceMTU(AF_INET6) fail at
-			// TUN creation: no v6 stack on the adapter means no v6 to fence.
-			logger.Warnf("skipping IPv6 fail-closed fence: IPv6 appears disabled on the TUN adapter (%v)", err)
+			// Hosts with IPv6 disabled system-wide remain usable in IPv4-only
+			// mode. If IPv6 is available on the adapter, failing to capture it
+			// would be a leak and must fail the enable.
+			logger.Warnf("skipping IPv6 full-tunnel capture: IPv6 appears disabled on the TUN adapter (%v)", err)
 			break
 		}
-		// v6 exists on the adapter but the fence could not be installed —
-		// continuing would silently leak IPv6 around the gateway.
 		_ = m.teardownGatewayRoutes(state)
-		return nil, fmt.Errorf("install IPv6 fail-closed fence: %w", err)
+		return nil, fmt.Errorf("install IPv6 full-tunnel routes: %w", err)
+	}
+
+	if err := m.replaceBypassRoutes(state); err != nil {
+		_ = m.teardownGatewayRoutes(state)
+		return nil, fmt.Errorf("install client bypass routes: %w", err)
 	}
 
 	return state, nil
+}
+
+func parseClientBypassCIDRs(rawCIDRs []string) ([]netip.Prefix, error) {
+	seen := make(map[netip.Prefix]struct{}, len(rawCIDRs))
+	prefixes := make([]netip.Prefix, 0, len(rawCIDRs))
+	for _, raw := range rawCIDRs {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		prefix, err := netip.ParsePrefix(raw)
+		if err != nil {
+			return nil, fmt.Errorf("parse VPN gateway bypass CIDR %q: %w", raw, err)
+		}
+		prefix = prefix.Masked()
+		// /0 and /1 would tie with or override the full-tunnel capture rather
+		// than represent a narrow exception. Require a more-specific prefix.
+		if prefix.Bits() <= 1 {
+			return nil, fmt.Errorf("VPN gateway bypass CIDR %s must be more specific than /1", prefix)
+		}
+		if _, ok := seen[prefix]; ok {
+			continue
+		}
+		seen[prefix] = struct{}{}
+		prefixes = append(prefixes, prefix)
+	}
+	return prefixes, nil
+}
+
+func (m *Manager) replaceBypassRoutes(state *routeState) error {
+	var errs []error
+	for _, row := range state.bypassRoutes {
+		if err := row.Delete(); err != nil {
+			errs = append(errs, fmt.Errorf("delete old bypass route %s: %w", row.DestinationPrefix.Prefix(), err))
+		}
+	}
+	state.bypassRoutes = nil
+	if len(state.bypassPrefixes) == 0 {
+		return errors.Join(errs...)
+	}
+
+	var (
+		uplink4, uplink6 uplinkRoute
+		have4, have6     bool
+		loaded4, loaded6 bool
+	)
+	for _, prefix := range state.bypassPrefixes {
+		var uplink *uplinkRoute
+		if prefix.Addr().Is4() {
+			if !loaded4 {
+				var err error
+				uplink4, have4, err = bestUplinkDefault(windows.AF_INET, state.tunLUID)
+				if err != nil {
+					errs = append(errs, fmt.Errorf("find IPv4 uplink for bypass routes: %w", err))
+				}
+				loaded4 = true
+			}
+			if have4 {
+				uplink = &uplink4
+			}
+		} else {
+			if !loaded6 {
+				var err error
+				uplink6, have6, err = bestUplinkDefault(windows.AF_INET6, state.tunLUID)
+				if err != nil {
+					errs = append(errs, fmt.Errorf("find IPv6 uplink for bypass routes: %w", err))
+				}
+				loaded6 = true
+			}
+			if have6 {
+				uplink = &uplink6
+			}
+		}
+
+		if uplink == nil {
+			// Fail closed: without a usable physical uplink route, leave the
+			// destination matching the TUN /1 instead of guessing another NIC.
+			logger.Warnf("no physical uplink for VPN bypass prefix %s; keeping it inside the tunnel", prefix)
+			continue
+		}
+		if err := state.addBypassRoute(prefix, *uplink); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func (state *routeState) addBypassRoute(prefix netip.Prefix, uplink uplinkRoute) error {
+	row := winipcfg.MibIPforwardRow2{}
+	row.Init()
+	row.InterfaceLUID = winipcfg.LUID(uplink.IfLUID)
+	row.DestinationPrefix.PrefixLength = uint8(prefix.Bits())
+	if err := row.DestinationPrefix.RawPrefix.SetAddr(prefix.Addr()); err != nil {
+		return fmt.Errorf("set bypass destination %s: %w", prefix, err)
+	}
+
+	nextHop := uplink.NextHop
+	if !nextHop.IsValid() {
+		if prefix.Addr().Is4() {
+			nextHop = netip.IPv4Unspecified()
+		} else {
+			nextHop = netip.IPv6Unspecified()
+		}
+	}
+	if err := row.NextHop.SetAddr(nextHop); err != nil {
+		return fmt.Errorf("set bypass next hop for %s: %w", prefix, err)
+	}
+	row.Metric = bypassRouteMetric
+
+	if err := row.Create(); err != nil {
+		return fmt.Errorf("add bypass route %s via ifIndex %d: %w", prefix, uplink.IfIndex, err)
+	}
+	state.bypassRoutes = append(state.bypassRoutes, row)
+	return nil
 }
 
 // addTunRoute creates one on-link route (unspecified next hop) via the TUN
@@ -158,6 +288,13 @@ func (m *Manager) teardownGatewayRoutes(state *routeState) error {
 	}
 
 	var errs []error
+	for _, row := range state.bypassRoutes {
+		if err := row.Delete(); err != nil {
+			errs = append(errs, fmt.Errorf("del bypass route: %w", err))
+		}
+	}
+	state.bypassRoutes = nil
+
 	for _, row := range state.routes {
 		if err := row.Delete(); err != nil {
 			errs = append(errs, fmt.Errorf("del route: %w", err))
@@ -208,7 +345,7 @@ func (m *Manager) teardownGatewayRoutes(state *routeState) error {
 // everything when the session closes or the process dies, so the fence can
 // never outlive the gateway — crash fail-open is consistent with the /1
 // routes dying with the Wintun adapter.
-func setupClientFence(state *routeState) error {
+func setupClientFence(state *routeState, bypassPrefixes []netip.Prefix) error {
 	exe, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("resolve own executable: %w", err)
@@ -230,7 +367,7 @@ func setupClientFence(state *routeState) error {
 	// on any later failure — same idiom as the server-side setupWFP.
 	state.wfpSession = session
 
-	rules, err := clientFenceRules(sublayerID, state.tunLUID, appID)
+	rules, err := clientFenceRules(sublayerID, state.tunLUID, appID, bypassPrefixes)
 	if err != nil {
 		return err
 	}
@@ -242,9 +379,10 @@ func setupClientFence(state *routeState) error {
 	return nil
 }
 
-// clientFenceRules builds the fence rule set for both address families: three
-// PERMITs over one unconditional BLOCK per layer (within a sublayer the
-// highest-weight matching filter wins).
+// clientFenceRules builds the fence rule set for both address families:
+// baseline PERMITs (plus an optional configured-bypass PERMIT) over one
+// unconditional BLOCK per layer. Within a sublayer the highest-weight
+// matching filter wins.
 //
 //   - permit our own process (ALE_APP_ID): libp2p and the SOCKS5 exit-node
 //     dials are bound to the uplink NIC by design (sockmark) and must keep
@@ -258,10 +396,13 @@ func setupClientFence(state *routeState) error {
 //     on-link LAN routes legitimately beat the /1 capture — this also covers
 //     DHCP renewals), multicast and broadcast (mDNS/SSDP/DHCP DISCOVER).
 //     Multiple conditions on one field OR together.
+//   - permit configured bypass destinations: these are paired with explicit
+//     physical-uplink routes, so WFP must not turn the intended split tunnel
+//     into a block.
 //   - block everything else — most notably flows whose local interface is the
 //     physical NIC: pre-gateway established connections and sockets
 //     explicitly bound to the NIC address.
-func clientFenceRules(sublayer wf.SublayerID, tunLUID winipcfg.LUID, appID string) ([]*wf.Rule, error) {
+func clientFenceRules(sublayer wf.SublayerID, tunLUID winipcfg.LUID, appID string, bypassPrefixes []netip.Prefix) ([]*wf.Rule, error) {
 	localDst4 := []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")}
 	localDst4 = append(localDst4, privateSubnetPrefixes()...)
 	localDst4 = append(localDst4,
@@ -275,13 +416,23 @@ func clientFenceRules(sublayer wf.SublayerID, tunLUID winipcfg.LUID, appID strin
 		netip.MustParsePrefix("ff00::/8"),
 	}
 
+	var bypass4, bypass6 []netip.Prefix
+	for _, prefix := range bypassPrefixes {
+		if prefix.Addr().Is4() {
+			bypass4 = append(bypass4, prefix)
+		} else {
+			bypass6 = append(bypass6, prefix)
+		}
+	}
+
 	layers := []struct {
-		layer    wf.LayerID
-		suffix   string
-		localDst []netip.Prefix
+		layer     wf.LayerID
+		suffix    string
+		localDst  []netip.Prefix
+		bypassDst []netip.Prefix
 	}{
-		{wf.LayerALEAuthConnectV4, "v4", localDst4},
-		{wf.LayerALEAuthConnectV6, "v6", localDst6},
+		{wf.LayerALEAuthConnectV4, "v4", localDst4, bypass4},
+		{wf.LayerALEAuthConnectV6, "v6", localDst6, bypass6},
 	}
 
 	var rules []*wf.Rule
@@ -324,6 +475,18 @@ func clientFenceRules(sublayer wf.SublayerID, tunLUID winipcfg.LUID, appID strin
 		err = addRule("permit local destinations "+l.suffix, l.layer, fenceWeightPermitLocal, localConds, wf.ActionPermit)
 		if err != nil {
 			return nil, err
+		}
+		if len(l.bypassDst) > 0 {
+			var bypassConds []*wf.Match
+			for _, p := range l.bypassDst {
+				bypassConds = append(bypassConds, &wf.Match{
+					Field: wf.FieldIPRemoteAddress, Op: wf.MatchTypeEqual, Value: p,
+				})
+			}
+			err = addRule("permit configured bypass "+l.suffix, l.layer, fenceWeightPermitBypass, bypassConds, wf.ActionPermit)
+			if err != nil {
+				return nil, err
+			}
 		}
 		err = addRule("block tunnel bypass "+l.suffix, l.layer, fenceWeightBlock, nil, wf.ActionBlock)
 		if err != nil {

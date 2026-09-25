@@ -416,8 +416,12 @@ func createTestTUN(t *testing.T) (winipcfg.LUID, string, tun.Device) {
 	guid, err := luid.GUID()
 	require.NoError(t, err)
 
-	// Assign the awl IP so the adapter is a plausible stand-in for production.
-	err = luid.SetIPAddresses([]netip.Prefix{netip.MustParsePrefix("10.66.0.2/16")})
+	// Assign both awl addresses so the adapter matches a production
+	// dual-stack Windows client.
+	err = luid.SetIPAddresses([]netip.Prefix{
+		netip.MustParsePrefix("10.66.0.2/16"),
+		netip.MustParsePrefix("fd00:66:0::2/48"),
+	})
 	require.NoError(t, err)
 
 	return luid, guid.String(), device
@@ -455,7 +459,7 @@ func TestGatewayHostNetClientRoutesLifecycle(t *testing.T) {
 	tunLUID, tunGUID, _ := createTestTUN(t)
 
 	for cycle := 1; cycle <= 2; cycle++ {
-		require.NoError(t, mgr.EnableClientRoutes(tunGUID), "cycle %d", cycle)
+		require.NoError(t, mgr.EnableClientRoutes(tunGUID, nil), "cycle %d", cycle)
 		require.True(t, mgr.ClientRoutesActive(), "cycle %d", cycle)
 		// Egress of this host is now captured by the /1 routes into a TUN
 		// nobody reads — a black hole until teardown a few lines down.
@@ -464,7 +468,7 @@ func TestGatewayHostNetClientRoutesLifecycle(t *testing.T) {
 		require.Contains(t, routes, "0.0.0.0/1", "cycle %d", cycle)
 		require.Contains(t, routes, "128.0.0.0/1", "cycle %d", cycle)
 		if tunHasIPv6(tunLUID) {
-			require.Contains(t, routes, "::/1", "cycle %d: IPv6 fence must be installed when the adapter has a v6 stack", cycle)
+			require.Contains(t, routes, "::/1", "cycle %d: IPv6 full-tunnel route must be installed when the adapter has a v6 stack", cycle)
 			require.Contains(t, routes, "8000::/1", "cycle %d", cycle)
 		}
 		require.Equal(t, 8, clientFenceRuleCount(t),
@@ -482,6 +486,45 @@ func TestGatewayHostNetClientRoutesLifecycle(t *testing.T) {
 	}
 }
 
+
+func TestGatewayHostNetClientIPv6BypassLifecycle(t *testing.T) {
+	verifyNoLeaks(t)
+	requireAdmin(t)
+	mgr := NewManager()
+	startManager(t, mgr)
+	_, tunGUID, _ := createTestTUN(t)
+
+	uplink, ok, err := bestUplinkDefault(windows.AF_INET6, 0)
+	require.NoError(t, err)
+	if !ok {
+		t.Skip("no IPv6 uplink; cannot validate an IPv6 bypass route")
+	}
+
+	const bypass = "2001:db8:1234::/48"
+	require.NoError(t, mgr.EnableClientRoutes(tunGUID, []string{bypass}))
+	t.Cleanup(func() { _ = mgr.DisableClientRoutes() })
+	require.Equal(t, 9, clientFenceRuleCount(t),
+		"one IPv6 configured-bypass permit must be added to the base fence")
+
+	require.Eventually(t, func() bool {
+		rows, err := winipcfg.GetIPForwardTable2(windows.AF_INET6)
+		if err != nil {
+			return false
+		}
+		for i := range rows {
+			if rows[i].InterfaceLUID == winipcfg.LUID(uplink.IfLUID) &&
+				rows[i].DestinationPrefix.Prefix().String() == bypass {
+				return true
+			}
+		}
+		return false
+	}, 5*time.Second, 100*time.Millisecond,
+		"configured IPv6 bypass route must use the physical uplink")
+
+	require.NoError(t, mgr.DisableClientRoutes())
+	require.Equal(t, 0, clientFenceRuleCount(t))
+}
+
 // TestGatewayHostNetClientRoutesDieWithAdapter pins the documented crash
 // semantics: the /1 routes are bound to the adapter LUID, so when the process
 // dies (adapter disappears) the routes disappear with it — no dangling /1
@@ -493,7 +536,7 @@ func TestGatewayHostNetClientRoutesDieWithAdapter(t *testing.T) {
 	startManager(t, mgr)
 	tunLUID, tunGUID, device := createTestTUN(t)
 
-	require.NoError(t, mgr.EnableClientRoutes(tunGUID))
+	require.NoError(t, mgr.EnableClientRoutes(tunGUID, nil))
 	require.Contains(t, tunRoutes(t, tunLUID), "0.0.0.0/1")
 	// This test deliberately skips teardown to simulate a crash, but the WFP
 	// fence session is process-scoped (dynamic), not test-scoped: without this
@@ -578,7 +621,7 @@ func TestGatewayHostNetClientFenceBlocksBypass(t *testing.T) {
 		t.Skip("NIC-bound HTTPS does not work even without the fence; runner egress is restricted")
 	}
 
-	require.NoError(t, mgr.EnableClientRoutes(tunGUID))
+	require.NoError(t, mgr.EnableClientRoutes(tunGUID, nil))
 	require.Equal(t, 8, clientFenceRuleCount(t), "fence must be up while enabled")
 
 	require.False(t, curlBoundToNIC(t, srcIP),
@@ -602,7 +645,7 @@ func TestGatewayHostNetClientFenceAllowsClientServerCoexist(t *testing.T) {
 	_, tunGUID, _ := createTestTUN(t)
 	_, nicGUID := pickServerTestNIC(t)
 
-	require.NoError(t, mgr.EnableClientRoutes(tunGUID))
+	require.NoError(t, mgr.EnableClientRoutes(tunGUID, nil))
 	require.NoError(t, mgr.EnableServerNAT(testAwlSubnet, "", nicGUID))
 	t.Cleanup(func() { _ = mgr.DisableServerNAT() })
 

@@ -13,6 +13,7 @@ import (
 const (
 	gatewayTestPacketSize = 500
 	internetIP            = "8.8.8.8"
+	internetIPv6          = "2001:4860:4860::8888"
 )
 
 // skipIfVPNGatewayUnsupported skips tests that drive the VPN gateway runtime API
@@ -162,6 +163,82 @@ func TestGatewayBidirectional(t *testing.T) {
 	src, dst = parsePacketIPs(rawPkt)
 	ts.Equal(internetIP, src.String())
 	ts.Equal("10.66.0.1", dst.String())
+}
+
+// TestGatewayBidirectionalIPv6 verifies that gateway direction flags and
+// address rewriting are family-neutral. This is the data-plane half of the
+// Windows-client -> Linux-exit dual-stack path; Windows hostnet tests cover
+// capturing IPv6 into Wintun, while Linux NAT tests cover NAT66.
+func TestGatewayBidirectionalIPv6(t *testing.T) {
+	ts := NewTestSuite(t)
+	client, exitNode, _ := setupGatewayPeers(ts)
+
+	clientLocalIPv6, _ := client.app.Conf.VPNLocalIPMaskV6()
+	ts.NotNil(clientLocalIPv6, "test client must have an AWL IPv6 address")
+
+	clientPeerOnExit, ok := exitNode.app.Conf.GetPeer(client.PeerID())
+	ts.True(ok)
+	ts.NotEmpty(clientPeerOnExit.IPAddrV6,
+		"exit node must know the client's AWL IPv6 address")
+
+	exitInbound := captureInbound(exitNode, 10)
+	clientInbound := captureInbound(client, 10)
+
+	// Client -> internet: the exit node receives the original internet
+	// destination, with only the source rewritten to the client's peer-specific
+	// AWL IPv6 address.
+	outPacket := testPacketWithSrcDestV6(
+		gatewayTestPacketSize,
+		clientLocalIPv6.String(),
+		internetIPv6,
+	)
+	client.tun.Outbound <- [][]byte{outPacket}
+
+	rawPkt, ok := recvPacketWithTimeout(exitInbound)
+	ts.True(ok, "exit node should receive outbound IPv6 gateway packet")
+	src, dst := parsePacketIPs(rawPkt)
+	ts.Equal(clientPeerOnExit.IPAddrV6, src.String())
+	ts.Equal(internetIPv6, dst.String())
+
+	// Internet -> client: simulate the packet returned by the Linux kernel
+	// after forwarding/NAT66. The client side rewrites only the destination
+	// back to its local Wintun IPv6.
+	returnPacket := testPacketWithSrcDestV6(
+		gatewayTestPacketSize,
+		internetIPv6,
+		clientPeerOnExit.IPAddrV6,
+	)
+	exitNode.tun.Outbound <- [][]byte{returnPacket}
+
+	rawPkt, ok = recvPacketWithTimeout(clientInbound)
+	ts.True(ok, "client should receive return IPv6 gateway packet")
+	src, dst = parsePacketIPs(rawPkt)
+	ts.Equal(internetIPv6, src.String())
+	ts.Equal(clientLocalIPv6.String(), dst.String())
+}
+
+// TestGatewayClientPassesBypassCIDRsToNetManager verifies the persisted
+// split-tunnel configuration reaches the OS networking layer when the gateway
+// client is enabled. The Windows-specific tests cover what that layer does
+// with the prefixes; this test pins the cross-platform service plumbing.
+func TestGatewayClientPassesBypassCIDRsToNetManager(t *testing.T) {
+	skipIfVPNGatewayUnsupported(t)
+	ts := NewTestSuite(t)
+	client, exitNode, _ := setupGatewayPeers(ts)
+
+	want := []string{"2001:4860::/32", "203.0.113.7/32"}
+	client.app.Conf.Lock()
+	client.app.Conf.VPNGateway.ClientBypassCIDRs = append([]string(nil), want...)
+	client.app.Conf.Unlock()
+
+	mgr, ok := client.app.NetManager.(*testNetManager)
+	ts.True(ok, "test peer must use testNetManager")
+	ts.False(mgr.ClientRoutesActive(), "setupGatewayPeers binds only the tunnel; OS routes must still be off")
+
+	ts.NoError(client.api.EnableVPNGatewayClient(exitNode.PeerID()))
+	ts.True(mgr.ClientRoutesActive())
+	ts.Equal(want, mgr.ClientBypassCIDRs(),
+		"VPNGateway.applyClient must pass configured bypass CIDRs to NetManager")
 }
 
 // TestGatewayPermissionDenied covers two complementary revocation paths:

@@ -112,6 +112,11 @@ type (
 		ClientEnabled bool `json:"clientEnabled"`
 		// GatewayPeerID — selected gateway peer ID.
 		GatewayPeerID string `json:"gatewayPeerID"`
+		// ClientBypassCIDRs are destination prefixes that should stay on the
+		// physical uplink while VPN gateway client mode is enabled. Windows
+		// installs each prefix as a more-specific route and permits it through
+		// the WFP leak fence. Prefixes must be more specific than /1.
+		ClientBypassCIDRs []string `json:"clientBypassCIDRs,omitempty"`
 		// ServerEnabled — this node serves as a VPN gateway for others.
 		// Propagated via the status protocol so peers know whether to offer
 		// this node as an option in their UI.

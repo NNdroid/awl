@@ -181,23 +181,21 @@ func (m *Manager) watch(ctx context.Context, cleanup func()) {
 
 // onNetworkChange runs the debounced consumers of a network-change event:
 // socket-marking re-detection first (lock-free — atomics + the registry's own
-// lock), then the exit node's forwarding re-sync, which takes m.mu.
-// EnableServerNAT can hold m.mu for seconds of PowerShell, and must never
-// delay socket re-binding — only the re-sync itself, which is harmless.
+// lock), then client bypass-route and server-forwarding re-syncs, both of
+// which take m.mu. EnableServerNAT can hold m.mu for seconds of PowerShell,
+// and must never delay socket re-binding — only the re-sync itself.
 func (m *Manager) onNetworkChange() {
 	m.redetectUplinks()
+	m.resyncClientBypassRoutes()
 	m.resyncServerForwarding()
 }
 
-// EnableClientRoutes installs the gateway client routes on the TUN (the
-// default-route capture plus the IPv6 fail-closed fence). Idempotent: a
-// second call while routes are installed is a no-op. Offline enable is
-// allowed with a warning: the /1 routes are bound to the TUN LUID and need
-// no uplink, marking with index 0 is a no-op, and the watcher re-binds
-// registered sockets once connectivity appears — the gateway self-heals
-// without a re-enable. IPv6 is not required: the tunnel is IPv4-only and
-// gateway mode fences IPv6.
-func (m *Manager) EnableClientRoutes(tunIfName string) error {
+// EnableClientRoutes installs the dual-stack gateway client routes on the TUN.
+// Optional bypass CIDRs are routed through the current physical uplink and
+// permitted through the WFP leak fence. Offline enable is allowed: full-tunnel
+// /1 routes still fail closed, while bypass routes are installed when an
+// uplink later appears and the network-change watcher reconciles state.
+func (m *Manager) EnableClientRoutes(tunIfName string, bypassCIDRs []string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -208,12 +206,25 @@ func (m *Manager) EnableClientRoutes(tunIfName string) error {
 		logger.Warnf("gateway client enabled with no IPv4 uplink; internet will flow when network appears")
 	}
 
-	state, err := m.setupGatewayRoutes(tunIfName)
+	state, err := m.setupGatewayRoutes(tunIfName, bypassCIDRs)
 	if err != nil {
 		return fmt.Errorf("setup gateway routes: %w", err)
 	}
 	m.routeState = state
 	return nil
+}
+
+
+func (m *Manager) resyncClientBypassRoutes() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.routeState == nil || len(m.routeState.bypassPrefixes) == 0 {
+		return
+	}
+	if err := m.replaceBypassRoutes(m.routeState); err != nil {
+		logger.Errorf("reconcile VPN gateway bypass routes after uplink change: %v", err)
+	}
 }
 
 // DisableClientRoutes removes the gateway client routes. Idempotent; a no-op

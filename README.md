@@ -247,11 +247,11 @@ Traffic through a peer has no restrictions beyond the connection between the two
 
 ## VPN gateway (full-tunnel exit node)
 
-awl can route **all** of your IPv4 traffic through a remote device at the IP layer — the same model as classic full-tunnel WireGuard/OpenVPN. The remote device becomes your exit node: your traffic reaches the internet from its IP, not yours.
+awl can route your system traffic through a remote device at the IP layer — the same model as classic full-tunnel WireGuard/OpenVPN. IPv4 is supported on Linux and Windows clients; IPv6 is supported when the client is Windows or Linux and the exit node is Linux. The remote device becomes your exit node: tunneled traffic reaches the internet from its IP, not yours.
 
 ### VPN gateway vs SOCKS5 proxy
 
-awl has two independent ways to send your traffic through another device, and a device can offer either one without the other. The **SOCKS5 proxy** works per-application: you point a specific app (a browser, say) at awl's local proxy, and only that app's traffic goes through the peer — nothing on your system changes. The **VPN gateway** is system-wide: it routes *all* of your IPv4 traffic through the exit node at the IP layer, so every app is covered without configuring anything.
+awl has two independent ways to send your traffic through another device, and a device can offer either one without the other. The **SOCKS5 proxy** works per-application: you point a specific app (a browser, say) at awl's local proxy, and only that app's traffic goes through the peer — nothing on your system changes. The **VPN gateway** is system-wide: it routes traffic through the exit node at the IP layer, so every app is covered without configuring anything. On Windows clients using a Linux exit node this is dual-stack (IPv4 + IPv6).
 
 In short: reach for SOCKS5 to send a single app through a peer, and for the VPN gateway when you want the whole device to look like it's at the exit node.
 
@@ -261,14 +261,12 @@ In short: reach for SOCKS5 to send a single app through a peer, and for the VPN 
 | --- | --- | --- | --- |
 | Linux | ✅ | ✅ | fully supported |
 | Android | ✅ | ❌ | exit-node role needs root — not planned |
-| Windows | ✅ | ✅ | fully supported |
+| Windows | ✅ | ✅ | client: IPv4 + IPv6 through a Linux exit; Windows exit-node NAT is IPv4-only |
 | macOS | ❌ | ❌ | needs volunteers for testing |
 
 On macOS awl currently refuses to start with VPN gateway enabled.
 
-> ⚠️ **IPv6 is not tunnelled.** The gateway only carries IPv4. While it's on, all IPv6 traffic is dropped so that your real IPv6 address is never exposed past the exit node:
-> - **Dual-stack (IPv4 + IPv6):** everything automatically uses IPv4 through the tunnel.
-> - **IPv6-only network:** you'll have no internet connectivity until you turn the gateway off.
+> **IPv6:** Windows clients now capture IPv6 into Wintun and carry it over the same AWL gateway stream as IPv4. A Linux exit node can forward/NAT66 that traffic. Windows as an IPv6 exit node is not supported because the WinNAT path used by awl is IPv4-only. If the selected exit cannot provide IPv6 egress, the client stays fail-closed rather than sending IPv6 directly outside the tunnel.
 
 ### Serve as an exit node
 
@@ -299,6 +297,27 @@ First make sure you've added the remote device and it has the gateway service en
 
 This takes effect immediately — no restart. Switching to a different peer in the dropdown atomically moves the gateway to the new device.
 
+#### Windows split-tunnel bypass
+
+On Windows, destination CIDRs can be excluded from the full tunnel with the optional `vpnGateway.clientBypassCIDRs` config field. Each entry is installed as a more-specific route on the current physical uplink and is also permitted through the WFP leak fence; when Wi-Fi/Ethernet changes, awl rebuilds those routes automatically.
+
+Example:
+
+```json
+"vpnGateway": {
+  "clientEnabled": true,
+  "gatewayPeerID": "<peer-id>",
+  "clientBypassCIDRs": [
+    "2606:4700:4700::1111/128",
+    "2001:4860::/32",
+    "203.0.113.7/32"
+  ],
+  "serverEnabled": false
+}
+```
+
+AWL/libp2p transport sockets are bypassed separately with `IP_UNICAST_IF` / `IPV6_UNICAST_IF`; they do not need to be listed here. Link-local, ULA, loopback and multicast destinations keep the existing local-network exemptions. If your LAN uses a globally-routable IPv6 prefix and you want direct LAN access while the gateway is active, add that LAN prefix to `clientBypassCIDRs`. Prefixes `/0` and `/1` are rejected because they would defeat the full-tunnel capture.
+
 To confirm it's working, open a "what's my IP" site such as https://ifconfig.co — it should show the exit node's public IP, not yours.
 
 #### Via the CLI
@@ -324,7 +343,8 @@ The privacy exposure — your IP appearing as the source of another device's tra
 
 - **A device isn't available as an exit node.** It hasn't turned on **Serve as VPN Gateway**, or hasn't set **Allow as exit node** to *Allowed* for you, or the status exchange hasn't propagated yet — wait up to ~5 minutes or until the next reconnect.
 - **A "what's my IP" site still shows your own IP after enabling.** Check the gateway status (the **VPN Gateway** card, or `awl cli gateway status`): if it's not connected, awl can't reach the exit node, so nothing is being tunnelled.
-- **A site works over IPv6 but not through the gateway.** Expected — IPv6 isn't tunnelled (see the note above). Dual-stack hosts fall back to IPv4 automatically; anything IPv6-only won't work while the gateway is on.
+- **IPv6 does not work through a Linux exit node.** Confirm the exit node itself has IPv6 connectivity and that its NAT66 path is available. The Windows client intentionally keeps IPv6 inside the tunnel instead of leaking it directly when the exit cannot forward it.
+- **A bypass CIDR still goes through the tunnel on Windows.** Check that the host has a usable physical default route for that address family. If no uplink exists when the gateway is enabled, awl keeps the prefix fail-closed in the tunnel and installs the bypass route when connectivity appears.
 - **Turning on *Serve as VPN Gateway* fails on Windows.** Windows effectively allows one NAT instance per host, and it may already be taken by Docker (Windows containers), WSL2 or Internet Connection Sharing — the error message lists the current holders. Free it up, or share this device over SOCKS5 instead: the SOCKS5 exit node doesn't need NAT.
 - **Turning on *Serve as VPN Gateway* on Windows fails with "WinNAT is not available" (HRESULT 0x80041010).** awl's exit-node NAT is built on Windows' own WinNAT, and on this installation the `MSFT_NetNat` WMI class doesn't exist. Windows **Home** editions don't ship WinNAT at all — there is no way to enable it there. On Pro/Enterprise/Server it can also be missing when neither Hyper-V nor RAS components are enabled (turning on the Hyper-V feature registers it) or when the WMI repository is corrupted. If you can't get WinNAT on your machine, share this device over SOCKS5 instead — the SOCKS5 exit node doesn't need it.
 - **No IPv6 connectivity after awl crashed (Linux).** If awl is killed (not shut down) with the gateway client on, its IPv6 block stays behind. It is removed automatically on the next awl start (and stop).

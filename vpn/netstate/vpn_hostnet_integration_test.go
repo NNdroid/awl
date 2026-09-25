@@ -52,7 +52,8 @@ const (
 	testTunIf      = "awl0"
 	testAwlSubnet  = "10.66.0.0/16"
 	testAwlSubnet6 = "fd00:66::/48"
-	ipForwardPath  = "/proc/sys/net/ipv4/ip_forward"
+	ipForwardPath   = "/proc/sys/net/ipv4/ip_forward"
+	ip6ForwardPath  = "/proc/sys/net/ipv6/conf/all/forwarding"
 )
 
 // ---- N1: NAT apply/teardown lifecycle ----
@@ -62,6 +63,8 @@ func TestGatewayHostNetNATLifecycle(t *testing.T) {
 	requireRoot(t)
 	setupDummyTun(t)
 	origForward := captureForward(t)
+	origForward6, hasIPv6 := captureForward6(t)
+	nat6Capable := hasIPv6 && ip6tablesNATAvailable(t)
 
 	before := snapshotNet(t)
 
@@ -71,6 +74,10 @@ func TestGatewayHostNetNATLifecycle(t *testing.T) {
 
 	assertNATApplied(t)
 	require.Equal(t, "1", readForward(t), "ip_forward must be on while NAT is up")
+	if nat6Capable {
+		assertNAT6Applied(t)
+		require.Equal(t, "1", readForward6(t), "IPv6 forwarding must be on while NAT66 is up")
+	}
 
 	require.NoError(t, mgr.DisableServerNAT())
 	require.False(t, mgr.ServerNATActive())
@@ -78,6 +85,42 @@ func TestGatewayHostNetNATLifecycle(t *testing.T) {
 	require.Equal(t, before, snapshotNet(t), "teardown must restore the exact pre-setup netfilter state")
 	require.Equal(t, origForward, readForward(t),
 		"a single setup/teardown must restore ip_forward to its original value")
+	if hasIPv6 {
+		require.Equal(t, origForward6, readForward6(t),
+			"a single setup/teardown must restore IPv6 forwarding to its original value")
+	}
+	if nat6Capable {
+		require.False(t, ip6tablesChainExists(t, awlForwardChain6),
+			"teardown must remove the IPv6 forwarding chain")
+	}
+}
+
+// TestGatewayHostNetNAT6FailureRestoresForwarding pins graceful-degradation
+// semantics: if NAT66 cannot be installed after awl enabled IPv6 forwarding,
+// the IPv4 exit node remains active but IPv6 forwarding must be restored to
+// its pre-enable value immediately.
+func TestGatewayHostNetNAT6FailureRestoresForwarding(t *testing.T) {
+	verifyNoLeaks(t)
+	requireRoot(t)
+	setupDummyTun(t)
+
+	origForward6, hasIPv6 := captureForward6(t)
+	if !hasIPv6 {
+		t.Skip("no IPv6 stack on this host")
+	}
+
+	mgr := NewManager()
+	// An invalid IPv6 source prefix forces the ip6tables setup path to fail.
+	// EnableServerNAT intentionally degrades that failure to IPv4-only.
+	require.NoError(t, mgr.EnableServerNAT(testAwlSubnet, "not-an-ipv6-prefix", testTunIf))
+	t.Cleanup(func() { _ = mgr.DisableServerNAT() })
+	require.True(t, mgr.ServerNATActive())
+	require.Equal(t, origForward6, readForward6(t),
+		"failed NAT66 setup must not leave IPv6 forwarding changed")
+
+	require.NoError(t, mgr.DisableServerNAT())
+	require.False(t, mgr.ServerNATActive())
+	require.Equal(t, origForward6, readForward6(t))
 }
 
 // ---- N2: NAT re-setup is idempotent (kill -9 recovery) ----
@@ -151,7 +194,7 @@ func TestGatewayHostNetRoutesLifecycle(t *testing.T) {
 
 	mgr := NewManager()
 	for cycle := 1; cycle <= 2; cycle++ {
-		require.NoError(t, mgr.EnableClientRoutes(testTunIf), "cycle %d", cycle)
+		require.NoError(t, mgr.EnableClientRoutes(testTunIf, nil), "cycle %d", cycle)
 		require.True(t, mgr.ClientRoutesActive(), "cycle %d", cycle)
 
 		assertRoutesApplied(t)
@@ -182,7 +225,7 @@ func TestGatewayHostNetRoutesStaleRecovery(t *testing.T) {
 	// on purpose for cleanupStaleRoutes to recover, exactly like a process that
 	// died before teardown.
 	mgr1 := NewManager()
-	require.NoError(t, mgr1.EnableClientRoutes(testTunIf))
+	require.NoError(t, mgr1.EnableClientRoutes(testTunIf, nil))
 	applied1 := snapshotNet(t)
 
 	// Simulate the TUN dying: deleting awl0 makes the kernel auto-remove the
@@ -190,7 +233,7 @@ func TestGatewayHostNetRoutesStaleRecovery(t *testing.T) {
 	recreateDummyTun(t)
 
 	mgr2 := NewManager()
-	require.NoError(t, mgr2.EnableClientRoutes(testTunIf),
+	require.NoError(t, mgr2.EnableClientRoutes(testTunIf, nil),
 		"re-setup must recover orphaned ip rule + table routes (cleanupStaleRoutes)")
 	require.Equal(t, applied1, snapshotNet(t), "recovered state must match a clean single setup")
 
@@ -223,7 +266,7 @@ func TestGatewayHostNetRoutesLeftoverTunRouteErrors(t *testing.T) {
 	t.Cleanup(func() { _ = netlink.RouteDel(leftover) })
 
 	mgr := NewManager()
-	err = mgr.EnableClientRoutes(testTunIf)
+	err = mgr.EnableClientRoutes(testTunIf, nil)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "leftover from a prior awl run",
 		"a colliding TUN default must produce the operator-facing diagnostic")
@@ -254,7 +297,7 @@ func TestGatewayHostNetRoutesStalenessReconcile(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	require.NoError(t, mgr.Start(ctx))
-	require.NoError(t, mgr.EnableClientRoutes(testTunIf))
+	require.NoError(t, mgr.EnableClientRoutes(testTunIf, nil))
 	t.Cleanup(func() { _ = mgr.DisableClientRoutes() })
 
 	// A second dummy "uplink" with an on-link subnet and its own default route,
@@ -313,7 +356,7 @@ func TestGatewayHostNetRoutesStalenessReconcileV6(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	require.NoError(t, mgr.Start(ctx))
-	require.NoError(t, mgr.EnableClientRoutes(testTunIf))
+	require.NoError(t, mgr.EnableClientRoutes(testTunIf, nil))
 	t.Cleanup(func() { _ = mgr.DisableClientRoutes() })
 
 	// A second dummy "uplink" with an on-link v6 subnet and its own v6 default,
@@ -386,7 +429,7 @@ func TestGatewayHostNetRoutesOfflineEnableSelfHeals(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	require.NoError(t, mgr.Start(ctx))
-	require.NoError(t, mgr.EnableClientRoutes(testTunIf),
+	require.NoError(t, mgr.EnableClientRoutes(testTunIf, nil),
 		"offline enable must proceed with a warning, not fail")
 	t.Cleanup(func() { _ = mgr.DisableClientRoutes() })
 	require.True(t, mgr.ClientRoutesActive())
@@ -453,6 +496,47 @@ func assertNATApplied(t *testing.T) {
 	require.Contains(t, nat, "-s "+testAwlSubnet+" ! -o "+testTunIf+" -j MASQUERADE", "MASQUERADE")
 }
 
+func ip6tablesNATAvailable(t *testing.T) bool {
+	t.Helper()
+	if _, err := os.Stat(ip6ForwardPath); err != nil {
+		return false
+	}
+	out, err := exec.Command("ip6tables", "-t", "nat", "-S").CombinedOutput()
+	if err != nil {
+		t.Logf("IPv6 NAT assertions skipped: ip6tables nat unavailable: %v: %s", err, out)
+		return false
+	}
+	return true
+}
+
+func ip6tablesChainExists(t *testing.T, chain string) bool {
+	t.Helper()
+	err := exec.Command("ip6tables", "-S", chain).Run()
+	return err == nil
+}
+
+func assertNAT6Applied(t *testing.T) {
+	t.Helper()
+
+	got := lines(cmdOut(t, "ip6tables", "-S", awlForwardChain6))
+	want := []string{
+		"-N " + awlForwardChain6,
+		"-A " + awlForwardChain6 + " -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT",
+	}
+	for _, p := range privateSubnetsV6 {
+		want = append(want, "-A "+awlForwardChain6+" -d "+p+" -j DROP")
+	}
+	want = append(want, "-A "+awlForwardChain6+" -j ACCEPT")
+	require.Equal(t, want, got, "AWL6-FORWARD chain content/order")
+
+	filter := cmdOut(t, "ip6tables", "-S", "FORWARD")
+	require.Contains(t, filter, "-s "+testAwlSubnet6+" -i "+testTunIf+" -j "+awlForwardChain6, "IPv6 outbound jump")
+	require.Contains(t, filter, "-d "+testAwlSubnet6+" -o "+testTunIf+" -j "+awlForwardChain6, "IPv6 return jump")
+
+	nat := cmdOut(t, "ip6tables", "-t", "nat", "-S", "POSTROUTING")
+	require.Contains(t, nat, "-s "+testAwlSubnet6+" ! -o "+testTunIf+" -j MASQUERADE", "IPv6 MASQUERADE")
+}
+
 func assertRoutesApplied(t *testing.T) {
 	t.Helper()
 
@@ -468,10 +552,10 @@ func assertRoutesApplied(t *testing.T) {
 	table := strings.TrimSpace(cmdOut(t, "ip", "-4", "route", "show", "table", strconv.Itoa(tableID)))
 	require.NotEmpty(t, table, "original default(s) must be copied into the awl table")
 
-	// IPv6 fail-closed fence. Installed unconditionally — even with IPv6 disabled
-	// via sysctl (disable_ipv6=1 blocks addresses, not routes). It is skipped
-	// only when the IPv6 stack is absent entirely (kernel ipv6.disable=1 →
-	// /proc/sys/net/ipv6 missing), matching setupIPv6Fence's EAFNOSUPPORT path.
+	// IPv6 full-tunnel route. Installed whenever the IPv6 stack is present;
+	// marked AWL/libp2p sockets use the exemption table while ordinary IPv6
+	// traffic uses the TUN default. A kernel-level ipv6.disable=1 removes the
+	// stack entirely, in which case there is no IPv6 route state to assert.
 	if _, err := os.Stat("/proc/sys/net/ipv6"); os.IsNotExist(err) {
 		return
 	}
@@ -590,6 +674,27 @@ func readForward(t *testing.T) string {
 
 // captureForward records the current ip_forward value and restores it after the
 // test, so tests stay order-independent regardless of the leave-if-on rule.
+func readForward6(t *testing.T) string {
+	t.Helper()
+	b, err := os.ReadFile(ip6ForwardPath)
+	require.NoError(t, err)
+	return strings.TrimSpace(string(b))
+}
+
+// captureForward6 records/restores the IPv6 forwarding state. ok=false means
+// the host has no IPv6 stack and callers should skip IPv6-specific assertions.
+func captureForward6(t *testing.T) (orig string, ok bool) {
+	t.Helper()
+	b, err := os.ReadFile(ip6ForwardPath)
+	if os.IsNotExist(err) {
+		return "", false
+	}
+	require.NoError(t, err)
+	orig = strings.TrimSpace(string(b))
+	t.Cleanup(func() { _ = os.WriteFile(ip6ForwardPath, []byte(orig), 0o600) })
+	return orig, true
+}
+
 func captureForward(t *testing.T) string {
 	t.Helper()
 	orig := readForward(t)

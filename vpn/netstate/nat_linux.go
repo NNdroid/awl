@@ -124,24 +124,37 @@ func (m *Manager) setupNATv6(state *natState) error {
 		}
 	}
 
+	// From this point onward a failure must restore forwarding if this call
+	// changed it. NAT6 is optional, so a failed setup must not leave unrelated
+	// host networking state behind while the IPv4 gateway continues running.
+	restoreForwardingOnError := func(cause error) error {
+		if state.origIPv6Forward != "0" {
+			return cause
+		}
+		if restoreErr := os.WriteFile("/proc/sys/net/ipv6/conf/all/forwarding", []byte("0"), 0600); restoreErr != nil {
+			return errors.Join(cause, fmt.Errorf("restore ipv6 forwarding after NAT6 setup failure: %w", restoreErr))
+		}
+		return cause
+	}
+
 	// ip6tables with nat table — will fail if the kernel module is absent.
 	ipt6, err := iptables.NewWithProtocol(iptables.ProtocolIPv6)
 	if err != nil {
-		return fmt.Errorf("init ip6tables: %w", err)
+		return restoreForwardingOnError(fmt.Errorf("init ip6tables: %w", err))
 	}
 
 	// Pre-clean any stale ip6tables state from a previous run.
 	if staleCleaned, err := cleanupStaleNAT6(ipt6, state.awlSubnet6, state.tunIfName); err != nil {
-		return fmt.Errorf("pre-clean stale NAT6: %w", err)
+		return restoreForwardingOnError(fmt.Errorf("pre-clean stale NAT6: %w", err))
 	} else if staleCleaned {
 		logger.Warnf("recovered from leftover gateway NAT6 state")
 	}
 
 	if err := setupIptables6(ipt6, state); err != nil {
-		// Roll back ip6tables partial state, but leave ipv6 forwarding as-is
-		// (same hands-off policy as IPv4: if it was already on, keep it).
-		_ = teardownIptablesRules6(state)
-		return err
+		// Roll back both partial ip6tables state and forwarding that this
+		// setup enabled. If forwarding was already on, leave it untouched.
+		teardownErrs := teardownIptablesRules6(state)
+		return restoreForwardingOnError(errors.Join(append([]error{err}, teardownErrs...)...))
 	}
 
 	state.ip6tablesOK = true
