@@ -278,10 +278,13 @@ func (data *Packet) recalculateChecksumIPv6() {
 	data.rememberIPv6Addrs()
 }
 
-// ipv6UpperLayer walks extension headers that have deterministic lengths and
-// returns the upper-layer protocol and offset. AH/ESP are deliberately not
-// rewritten: changing outer addresses invalidates their authentication and
-// AWL has no IPsec keys with which to repair them.
+// ipv6UpperLayer walks extension headers whose checksum semantics remain
+// compatible with the ordinary IPv6 pseudo-header and returns the upper-layer
+// protocol and offset. Routing Header is deliberately not handled here: its
+// pseudo-header destination can be the final routing destination rather than
+// the base IPv6 destination. AH/ESP are also not rewritten because changing
+// outer addresses invalidates their authentication and AWL has no IPsec keys
+// with which to repair them.
 func ipv6UpperLayer(packet []byte) (protocol byte, offset int, fragmented, firstFragment, ok bool) {
 	if len(packet) < ipv6.HeaderLen {
 		return 0, 0, false, false, false
@@ -296,7 +299,7 @@ func ipv6UpperLayer(packet []byte) (protocol byte, offset int, fragmented, first
 		case IPProtocolTCP, IPProtocolUDP, IPProtocolICMPv6:
 			return next, offset, fragmented, firstFragment, true
 
-		case ipv6NextHopByHop, ipv6NextRouting, ipv6NextDestOpts:
+		case ipv6NextHopByHop, ipv6NextDestOpts:
 			if offset+2 > len(packet) {
 				return 0, 0, false, false, false
 			}
@@ -323,7 +326,7 @@ func ipv6UpperLayer(packet []byte) (protocol byte, offset int, fragmented, first
 				return next, offset, true, false, true
 			}
 
-		case ipv6NextESP, ipv6NextAH, ipv6NextNoHeader:
+		case ipv6NextRouting, ipv6NextESP, ipv6NextAH, ipv6NextNoHeader:
 			return next, offset, fragmented, firstFragment, false
 
 		default:
